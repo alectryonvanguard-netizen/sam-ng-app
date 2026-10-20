@@ -72,8 +72,10 @@ class MainActivity : ComponentActivity() {
     @OptIn(UnstableApi::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        window.statusBarColor = android.graphics.Color.rgb(9, 11, 18)
-        window.navigationBarColor = android.graphics.Color.rgb(9, 11, 18)
+        try {
+            window.statusBarColor = android.graphics.Color.rgb(9, 11, 18)
+            window.navigationBarColor = android.graphics.Color.rgb(9, 11, 18)
+        } catch (_: Exception) { }
         setContent { CineMotionApp() }
     }
 }
@@ -92,9 +94,9 @@ private fun CineMotionApp() {
     var outputUri by remember { mutableStateOf<Uri?>(null) }
 
     val mediaPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
-        if (uris.isNotEmpty()) {
+        if (!uris.isNullOrEmpty()) {
             val additions = uris.mapNotNull { uri ->
-                val mime = context.contentResolver.getType(uri) ?: "application/octet-stream"
+                val mime = try { context.contentResolver.getType(uri) ?: "application/octet-stream" } catch (_: Exception) { "application/octet-stream" }
                 val image = mime.startsWith("image/")
                 val video = mime.startsWith("video/")
                 if (!image && !video) null else {
@@ -110,8 +112,11 @@ private fun CineMotionApp() {
             clips = clips + additions
             status = "Added ${additions.size} media item(s)."
             outputUri = null
-        } else status = "No media selected."
+        } else {
+            status = "No media selected."
+        }
     }
+
     val musicPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
             try { context.contentResolver.takePersistableUriPermission(uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION) } catch (_: Exception) { }
@@ -167,6 +172,7 @@ private fun CineMotionApp() {
                     Text("TIMELINE", color = Color.White, fontWeight = FontWeight.Bold, letterSpacing = 1.5.sp)
                     Text("${clips.size} clips", color = Cyan, fontSize = 12.sp)
                 }
+                
                 if (clips.isEmpty()) {
                     Box(modifier = Modifier.fillMaxWidth().height(95.dp).background(Panel, RoundedCornerShape(14.dp)), contentAlignment = Alignment.Center) {
                         Text("Tap Add media and select multiple photos/videos", color = Color.LightGray, fontSize = 12.sp)
@@ -209,14 +215,19 @@ private fun CineMotionApp() {
                         exporting = true
                         exportProgress = 0
                         status = "Export starting…"
-                        MediaEditor(context).export(
-                            clips = clips,
-                            musicUri = musicUri,
-                            imageDurationSeconds = imageSeconds,
-                            onProgress = { exportProgress = it; status = "Rendering your MP4…" },
-                            onComplete = { uri -> exporting = false; outputUri = uri; exportProgress = 100; status = "Export complete. Saved to Movies/CineMotion." },
-                            onError = { message -> exporting = false; status = message }
-                        )
+                        try {
+                            MediaEditor(context).export(
+                                clips = clips,
+                                musicUri = musicUri,
+                                imageDurationSeconds = imageSeconds,
+                                onProgress = { exportProgress = it; status = "Rendering your MP4…" },
+                                onComplete = { uri -> exporting = false; outputUri = uri; exportProgress = 100; status = "Export complete. Saved to Movies/CineMotion." },
+                                onError = { message -> exporting = false; status = message }
+                            )
+                        } catch (e: Exception) {
+                            exporting = false
+                            status = "Export error: ${e.localizedMessage}"
+                        }
                     },
                     enabled = clips.isNotEmpty() && !exporting,
                     modifier = Modifier.fillMaxWidth().height(52.dp),
