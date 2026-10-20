@@ -1,19 +1,17 @@
 
-plugins {
-    id("com.android.application")
-    id("org.jetbrains.kotlin.android")
-    id("org.jetbrains.kotlin.plugin.compose")
-}
+      - name: Inspect Gradle configuration
+        run: |
+          echo "=== Gradle files ==="
+          find . -maxdepth 3 \( -name "settings.gradle.kts" -o -name "build.gradle.kts" -o -name "settings.gradle" -o -name "build.gradle" \) -print
 
-android {
-    namespace = "com.samng.app"
-    compileSdk = 35
+          echo "=== Settings file ==="
+          cat settings.gradle.kts
 
-    defaultConfig {
-        applicationId = "com.samng.app"
-        minSdk = 23
-        targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
-    }
-}
+          echo "=== Root build file ==="
+          cat build.gradle.kts
+
+          echo "=== App build file ==="
+          cat app/build.gradle.kts
+
+          echo "=== Android plugin tasks ==="
+          gradle --no-daemon :app:tasks --all
