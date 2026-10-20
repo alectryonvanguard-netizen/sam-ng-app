@@ -1,10 +1,8 @@
 <resources>
-    <style name="Theme.CineMotion" parent="android:style/Theme.Material.Light.NoActionBar">
-        <item name="android:fontFamily">sans</item>
-        <item name="android:windowLightStatusBar">false</item>
+    <style name="Theme.CineMotion" parent="Theme.Material3.DayNight.NoActionBar">
         <item name="android:statusBarColor">#090B12</item>
         <item name="android:navigationBarColor">#090B12</item>
+        <item name="android:windowLightStatusBar">false</item>
         <item name="android:windowLightNavigationBar">false</item>
-        <item name="android:colorAccent">#00E5FF</item>
     </style>
 </resources>
