@@ -12,5 +12,5 @@ dependencyResolutionManagement {
         mavenCentral()
     }
 }
-rootProject.name = "CineMotionEditor"
+rootProject.name = "sam-ng-app"
 include(":app")
