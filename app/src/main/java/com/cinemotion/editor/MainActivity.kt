@@ -32,6 +32,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -1902,7 +1903,7 @@ private fun TextPanel(ed: EditorState, notify: (String) -> Unit) {
             textStyle = TextStyle(color = CMText, fontSize = 15.sp),
             cursorBrush = SolidColor(CMTeal),
             modifier = Modifier.weight(1f),
-            decorationBox = { inner ->
+            decorationBox = { innerTextField ->
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -1910,8 +1911,10 @@ private fun TextPanel(ed: EditorState, notify: (String) -> Unit) {
                         .border(1.dp, Color(0x33FFFFFF), RoundedCornerShape(12.dp))
                         .padding(horizontal = 14.dp, vertical = 12.dp)
                 ) {
-                    if (value.isEmpty()) Text("Type your text", color = CMMuted, fontSize = 15.sp)
-                    inner()
+                    if (value.isEmpty()) {
+                        Text("Type your text", color = CMMuted, fontSize = 15.sp)
+                    }
+                    innerTextField()
                 }
             }
         )
