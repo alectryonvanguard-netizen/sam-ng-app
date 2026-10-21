@@ -1,4 +1,3 @@
-
 package com.cinemotion.editor
 
 import android.content.ContentValues
@@ -12,7 +11,9 @@ import android.provider.MediaStore
 import androidx.annotation.OptIn
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
+import androidx.media3.common.audio.SonicAudioProcessor
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.effect.SpeedChangeEffect
 import androidx.media3.transformer.Composition
 import androidx.media3.transformer.EditedMediaItem
 import androidx.media3.transformer.EditedMediaItemSequence
@@ -30,13 +31,54 @@ import java.util.concurrent.atomic.AtomicBoolean
  * - Ordered photos and videos
  * - A configurable default photo duration
  * - Per-clip photo durations
- * - Video start/end trimming
+ * - Video start/end trimming (from the editor's Trim and Split tools)
+ * - Per-clip video speed (from the editor's Speed tool)
  * - Optional looping background music
  * - MP4 export to Movies/CineMotion
  *
  * All trim times are in milliseconds.
+ * Speed requires Media3 1.3 or newer (SpeedChangeEffect).
  */
 class MediaEditor(private val context: Context) {
+
+    companion object {
+        // Must match the keys MainActivity puts on the export Intent.
+        const val EXTRA_CLIP_STARTS = "com.cinemotion.editor.extra.CLIP_STARTS"
+        const val EXTRA_CLIP_ENDS = "com.cinemotion.editor.extra.CLIP_ENDS"
+        const val EXTRA_CLIP_SPEEDS = "com.cinemotion.editor.extra.CLIP_SPEEDS"
+
+        /**
+         * Builds per-clip edits from the data MainActivity sends to ExportService.
+         * The three arrays may be null (older callers); defaults are used then.
+         */
+        fun editsFrom(
+            uris: List<String>,
+            imageFlags: BooleanArray,
+            defaultImageSeconds: Int,
+            starts: LongArray?,
+            ends: LongArray?,
+            speeds: FloatArray?
+        ): List<ClipEdit> {
+            return uris.mapIndexed { i, uriString ->
+                val isImage = imageFlags.getOrNull(i) ?: false
+                val start = starts?.getOrNull(i) ?: 0L
+                val end = ends?.getOrNull(i)?.takeIf { it > start }
+                val speed = (speeds?.getOrNull(i) ?: 1f).coerceIn(0.25f, 4f)
+
+                ClipEdit(
+                    uri = Uri.parse(uriString),
+                    isImage = isImage,
+                    durationMs = if (isImage) {
+                        if (end != null) end - start
+                        else defaultImageSeconds.coerceIn(1, 30) * 1_000L
+                    } else 3_000L,
+                    startMs = if (isImage) 0L else start,
+                    endMs = if (isImage) null else end,
+                    speed = if (isImage) 1f else speed
+                )
+            }
+        }
+    }
 
     private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -48,19 +90,21 @@ class MediaEditor(private val context: Context) {
      * Per-clip edit settings.
      *
      * For photos, durationMs controls display duration.
-     * For videos, startMs and endMs define the retained interval.
-     * Leave endMs null to use the video's natural end.
+     * For videos, startMs and endMs define the retained interval
+     * (leave endMs null to use the video's natural end) and speed
+     * changes playback rate (1f = normal).
      */
     data class ClipEdit(
         val uri: Uri,
         val isImage: Boolean,
         val durationMs: Long = 3_000L,
         val startMs: Long = 0L,
-        val endMs: Long? = null
+        val endMs: Long? = null,
+        val speed: Float = 1f
     )
 
     /**
-     * Backward-compatible export function for the current MainActivity.
+     * Backward-compatible export function.
      */
     @OptIn(UnstableApi::class)
     fun export(
@@ -93,9 +137,6 @@ class MediaEditor(private val context: Context) {
 
     /**
      * Export with individual clip edit settings.
-     *
-     * Call this overload once MainActivity has collected settings
-     * for each timeline clip.
      */
     @OptIn(UnstableApi::class)
     fun exportEdited(
@@ -146,6 +187,12 @@ class MediaEditor(private val context: Context) {
                             "Video ${index + 1} must end after it starts."
                         )
                     }
+
+                    if (edit.speed <= 0f) {
+                        throw IOException(
+                            "Video ${index + 1} has an invalid speed."
+                        )
+                    }
                 }
 
                 context.contentResolver
@@ -177,9 +224,23 @@ class MediaEditor(private val context: Context) {
                         .setClippingConfiguration(clippingBuilder.build())
                 }
 
+                val effects =
+                    if (!edit.isImage && edit.speed != 1f) {
+                        val audioSpeed = SonicAudioProcessor().apply {
+                            setSpeed(edit.speed)
+                            setPitch(1f)
+                        }
+                        Effects(
+                            listOf(audioSpeed),
+                            listOf(SpeedChangeEffect(edit.speed))
+                        )
+                    } else {
+                        Effects(emptyList(), emptyList())
+                    }
+
                 EditedMediaItem.Builder(mediaItemBuilder.build())
                     .setFrameRate(30)
-                    .setEffects(Effects(emptyList(), emptyList()))
+                    .setEffects(effects)
                     .build()
             }
 
