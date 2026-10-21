@@ -14,6 +14,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
@@ -70,16 +71,12 @@ class MainActivity : ComponentActivity() {
 
                                 putStringArrayListExtra(
                                     ExportService.EXTRA_URIS,
-                                    ArrayList(
-                                        clips.map { it.uri.toString() }
-                                    )
+                                    ArrayList(clips.map { it.uri.toString() })
                                 )
 
                                 putStringArrayListExtra(
                                     ExportService.EXTRA_NAMES,
-                                    ArrayList(
-                                        clips.map { it.displayName }
-                                    )
+                                    ArrayList(clips.map { it.displayName })
                                 )
 
                                 putExtra(
@@ -89,9 +86,7 @@ class MainActivity : ComponentActivity() {
 
                                 putStringArrayListExtra(
                                     ExportService.EXTRA_MIME_TYPES,
-                                    ArrayList(
-                                        clips.map { it.mimeType }
-                                    )
+                                    ArrayList(clips.map { it.mimeType })
                                 )
 
                                 putExtra(
@@ -128,7 +123,6 @@ private fun CineMotionApp(
 ) {
     val context = LocalContext.current
 
-    // FIXED: MODE_PRIVATE must be accessed through Context.
     val prefs = remember {
         context.getSharedPreferences(
             "cinemotion_main",
@@ -144,11 +138,9 @@ private fun CineMotionApp(
     }
     var isExporting by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf("") }
-    var showRenameDialog by remember { mutableStateOf(false) }
-    var renameValue by remember { mutableStateOf("") }
-    var selectedIndex by remember { mutableIntStateOf(-1) }
 
     val clips = remember { mutableStateListOf<MediaClip>() }
+
     val draftNames = remember {
         mutableStateListOf<String>().apply {
             addAll(
@@ -158,6 +150,7 @@ private fun CineMotionApp(
             )
         }
     }
+
     val completedExports = remember {
         mutableStateListOf<CMExport>()
     }
@@ -174,7 +167,7 @@ private fun CineMotionApp(
                             Intent.FLAG_GRANT_READ_URI_PERMISSION
                         )
                     } catch (_: Exception) {
-                        // Some providers do not support persistent grants.
+                        // The provider may not support persistent access.
                     }
 
                     val mime = context.contentResolver.getType(uri)
@@ -185,7 +178,7 @@ private fun CineMotionApp(
                     val name = uri.lastPathSegment
                         ?.substringAfterLast('/')
                         ?.takeIf { it.isNotBlank() }
-                        ?: if (isImage) "Photo" else "Video or media"
+                        ?: if (isImage) "Photo" else "Media"
 
                     clips.add(
                         MediaClip(
@@ -213,7 +206,7 @@ private fun CineMotionApp(
                         Intent.FLAG_GRANT_READ_URI_PERMISSION
                     )
                 } catch (_: Exception) {
-                    // Continue with the granted URI permission.
+                    // Continue with the permission already granted.
                 }
 
                 musicUri = uri
@@ -228,6 +221,7 @@ private fun CineMotionApp(
         }
 
         val draftName = "Draft ${draftNames.size + 1}"
+
         if (!draftNames.contains(draftName)) {
             draftNames.add(draftName)
         }
@@ -245,8 +239,6 @@ private fun CineMotionApp(
             return
         }
 
-        isExporting = true
-
         val started = onStartExport(
             clips.toList(),
             musicUri,
@@ -254,6 +246,7 @@ private fun CineMotionApp(
         )
 
         if (started) {
+            isExporting = true
             message = "Export started in the background"
         } else {
             isExporting = false
@@ -310,7 +303,6 @@ private fun CineMotionApp(
             }
         }
     ) { innerPadding ->
-
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -427,8 +419,7 @@ private fun CineMotionApp(
                     TemplatesPage(
                         onUseTemplate = {
                             page = CMPage.EDITOR
-                            message =
-                                "Add your media to begin editing"
+                            message = "Add your media to begin editing"
                         }
                     )
                 }
@@ -458,7 +449,7 @@ private fun CineMotionApp(
                 }
 
                 CMPage.COMPLETED -> {
-                    CompletedPage(completedExports)
+                    CompletedPage(exports = completedExports)
                 }
 
                 CMPage.SETTINGS -> {
@@ -469,8 +460,7 @@ private fun CineMotionApp(
                             prefs.edit()
                                 .putString("quality", quality)
                                 .apply()
-                            message =
-                                "Preference saved: $quality"
+                            message = "Preference saved: $quality"
                         }
                     )
                 }
@@ -489,50 +479,6 @@ private fun CineMotionApp(
                 )
             }
         }
-    }
-
-    if (showRenameDialog) {
-        AlertDialog(
-            onDismissRequest = { showRenameDialog = false },
-            containerColor = CMSurface,
-            title = {
-                Text("Rename item", color = CMText)
-            },
-            text = {
-                OutlinedTextField(
-                    value = renameValue,
-                    onValueChange = { renameValue = it },
-                    label = { Text("New name") },
-                    singleLine = true
-                )
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        if (
-                            selectedIndex in clips.indices &&
-                            renameValue.isNotBlank()
-                        ) {
-                            val old = clips[selectedIndex]
-                            clips[selectedIndex] = old.copy(
-                                displayName = renameValue.trim()
-                            )
-                        }
-
-                        showRenameDialog = false
-                    }
-                ) {
-                    Text("Save", color = CMTeal)
-                }
-            },
-            dismissButton = {
-                TextButton(
-                    onClick = { showRenameDialog = false }
-                ) {
-                    Text("Cancel", color = CMMuted)
-                }
-            }
-        )
     }
 }
 
@@ -554,9 +500,7 @@ private fun HomePage(
                 shape = RoundedCornerShape(24.dp),
                 color = CMSurface
             ) {
-                Column(
-                    modifier = Modifier.padding(22.dp)
-                ) {
+                Column(modifier = Modifier.padding(22.dp)) {
                     Text(
                         "YOUR NEXT STORY STARTS HERE",
                         color = CMTeal,
@@ -665,9 +609,7 @@ private fun StatCard(
         color = CMSurface,
         shape = RoundedCornerShape(18.dp)
     ) {
-        Column(
-            modifier = Modifier.padding(16.dp)
-        ) {
+        Column(modifier = Modifier.padding(16.dp)) {
             Text(title, color = CMMuted, fontSize = 12.sp)
             Spacer(modifier = Modifier.height(8.dp))
             Text(
@@ -776,12 +718,10 @@ private fun EditorPage(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center
                 ) {
-                    Text(
-                        "▶",
-                        color = CMTeal,
-                        fontSize = 38.sp
-                    )
+                    Text("▶", color = CMTeal, fontSize = 38.sp)
+
                     Spacer(modifier = Modifier.height(8.dp))
+
                     Text(
                         if (clips.isEmpty()) {
                             "Your project preview"
@@ -791,7 +731,9 @@ private fun EditorPage(
                         color = CMText,
                         fontWeight = FontWeight.SemiBold
                     )
+
                     Spacer(modifier = Modifier.height(5.dp))
+
                     Text(
                         "Preview playback is not connected yet",
                         color = CMMuted,
@@ -850,7 +792,9 @@ private fun EditorPage(
                     Slider(
                         value = imageDuration.toFloat(),
                         onValueChange = {
-                            onDurationChange(it.toInt().coerceIn(1, 15))
+                            onDurationChange(
+                                it.toInt().coerceIn(1, 15)
+                            )
                         },
                         valueRange = 1f..15f,
                         steps = 13
@@ -875,19 +819,15 @@ private fun EditorPage(
 
                     Spacer(modifier = Modifier.height(8.dp))
 
-                    if (clips.isEmpty()) {
-                        Text(
-                            "Your photos and videos will appear here.",
-                            color = CMMuted,
-                            fontSize = 13.sp
-                        )
-                    } else {
-                        Text(
-                            "${clips.size} item(s) · drag-free ordering controls below",
-                            color = CMMuted,
-                            fontSize = 11.sp
-                        )
-                    }
+                    Text(
+                        if (clips.isEmpty()) {
+                            "Your photos and videos will appear here."
+                        } else {
+                            "${clips.size} item(s) in your timeline"
+                        },
+                        color = CMMuted,
+                        fontSize = 13.sp
+                    )
                 }
             }
         }
@@ -902,9 +842,7 @@ private fun EditorPage(
                 shape = RoundedCornerShape(14.dp)
             ) {
                 Column(modifier = Modifier.padding(12.dp)) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
                         Surface(
                             color = Color(0xFF1C303B),
                             shape = RoundedCornerShape(10.dp)
@@ -920,9 +858,7 @@ private fun EditorPage(
 
                         Spacer(modifier = Modifier.width(10.dp))
 
-                        Column(
-                            modifier = Modifier.weight(1f)
-                        ) {
+                        Column(modifier = Modifier.weight(1f)) {
                             Text(
                                 clip.displayName,
                                 color = CMText,
@@ -994,7 +930,9 @@ private fun EditorPage(
                         fontSize = 11.sp,
                         letterSpacing = 1.5.sp
                     )
+
                     Spacer(modifier = Modifier.height(6.dp))
+
                     Text(
                         musicUri?.lastPathSegment ?: "No audio selected",
                         color = if (musicUri == null) CMMuted else CMText,
@@ -1036,7 +974,7 @@ private fun EditorPage(
 
         item {
             Text(
-                "Export output is handled by MediaEditor and ExportService.",
+                "Export processing is handled by MediaEditor and ExportService.",
                 color = CMMuted,
                 fontSize = 11.sp,
                 modifier = Modifier.padding(bottom = 12.dp)
@@ -1049,6 +987,13 @@ private fun EditorPage(
 private fun TemplatesPage(
     onUseTemplate: () -> Unit
 ) {
+    val templates = listOf(
+        "Cinematic Story" to "A clean sequence for your memories",
+        "Photo Montage" to "Build a sequence from still photos",
+        "Travel Reel" to "Arrange clips from your journey",
+        "Music Video" to "Combine clips with a soundtrack"
+    )
+
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         verticalArrangement = Arrangement.spacedBy(12.dp)
@@ -1060,6 +1005,7 @@ private fun TemplatesPage(
                 fontSize = 26.sp,
                 fontWeight = FontWeight.Bold
             )
+
             Text(
                 "Choose a starting point for your project.",
                 color = CMMuted,
@@ -1067,14 +1013,7 @@ private fun TemplatesPage(
             )
         }
 
-        items(
-            listOf(
-                "Cinematic Story" to "A clean sequence for your memories",
-                "Photo Montage" to "Build a sequence from still photos",
-                "Travel Reel" to "Arrange clips from your journey",
-                "Music Video" to "Combine your clips with a soundtrack"
-            )
-        ) { template ->
+        items(templates) { template ->
             ActionRow(
                 title = template.first,
                 subtitle = template.second,
@@ -1113,10 +1052,7 @@ private fun DraftsPage(
 
         if (drafts.isEmpty()) {
             item {
-                Text(
-                    "No drafts saved yet.",
-                    color = CMMuted
-                )
+                Text("No drafts saved yet.", color = CMMuted)
             }
         } else {
             items(drafts, key = { it }) { draft ->
@@ -1135,15 +1071,11 @@ private fun DraftsPage(
                         Spacer(modifier = Modifier.height(8.dp))
 
                         Row {
-                            TextButton(
-                                onClick = { onOpen(draft) }
-                            ) {
+                            TextButton(onClick = { onOpen(draft) }) {
                                 Text("Open", color = CMTeal)
                             }
 
-                            TextButton(
-                                onClick = { onDelete(draft) }
-                            ) {
+                            TextButton(onClick = { onDelete(draft) }) {
                                 Text("Delete", color = CMAmber)
                             }
                         }
@@ -1154,7 +1086,7 @@ private fun DraftsPage(
 
         item {
             Text(
-                "Current draft storage saves draft names only; media restoration is not implemented yet.",
+                "Draft storage currently saves names only; restoring the timeline is not implemented yet.",
                 color = CMMuted,
                 fontSize = 11.sp
             )
@@ -1177,8 +1109,9 @@ private fun CompletedPage(
                 fontSize = 25.sp,
                 fontWeight = FontWeight.Bold
             )
+
             Text(
-                "Your finished videos are intended to be saved in Movies/CineMotion.",
+                "Finished videos are intended to be saved in Movies/CineMotion.",
                 color = CMMuted,
                 fontSize = 13.sp
             )
@@ -1197,9 +1130,11 @@ private fun CompletedPage(
                             color = CMText,
                             fontWeight = FontWeight.SemiBold
                         )
+
                         Spacer(modifier = Modifier.height(6.dp))
+
                         Text(
-                            "The export service completion results are not connected to this list yet. Check your Movies/CineMotion folder for exported files.",
+                            "Export completion is not connected to this list yet. Check your Movies/CineMotion folder for exported files.",
                             color = CMMuted,
                             fontSize = 12.sp
                         )
@@ -1234,6 +1169,7 @@ private fun SettingsPage(
                 fontSize = 26.sp,
                 fontWeight = FontWeight.Bold
             )
+
             Text(
                 "Configure your editing preferences.",
                 color = CMMuted,
@@ -1278,15 +1214,12 @@ private fun SettingsPage(
 
                             Spacer(modifier = Modifier.width(8.dp))
 
-                            Text(
-                                option,
-                                color = CMText
-                            )
+                            Text(option, color = CMText)
                         }
                     }
 
                     Text(
-                        "This preference is saved, but the current MediaEditor export implementation does not apply this quality selection yet.",
+                        "The preference is saved, but the current export implementation does not apply this resolution setting yet.",
                         color = CMMuted,
                         fontSize = 11.sp
                     )
@@ -1306,7 +1239,9 @@ private fun SettingsPage(
                         color = CMTeal,
                         fontWeight = FontWeight.Bold
                     )
+
                     Spacer(modifier = Modifier.height(5.dp))
+
                     Text(
                         "Video editing workspace",
                         color = CMMuted,
