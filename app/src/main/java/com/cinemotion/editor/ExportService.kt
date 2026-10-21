@@ -1,4 +1,3 @@
-
 package com.cinemotion.editor
 
 import android.app.Notification
@@ -76,9 +75,7 @@ class ExportService : Service() {
         startForegroundSafely(buildNotification("Preparing video…", 0))
 
         val uriStrings = intent.getStringArrayListExtra(EXTRA_URIS)
-        val names = intent.getStringArrayListExtra(EXTRA_NAMES)
         val imageFlags = intent.getBooleanArrayExtra(EXTRA_IMAGE_FLAGS)
-        val mimeTypes = intent.getStringArrayListExtra(EXTRA_MIME_TYPES)
 
         if (
             uriStrings.isNullOrEmpty() ||
@@ -89,31 +86,34 @@ class ExportService : Service() {
             return START_NOT_STICKY
         }
 
-        val clips = uriStrings.mapIndexed { index, value ->
-            MediaClip(
-                uri = Uri.parse(value),
-                displayName = names?.getOrNull(index) ?: "Media ${index + 1}",
-                isImage = imageFlags[index],
-                mimeType = mimeTypes?.getOrNull(index)
-                    ?: if (imageFlags[index]) "image/*" else "video/*"
-            )
-        }
+        val imageDuration = intent
+            .getIntExtra(EXTRA_IMAGE_DURATION, 3)
+            .coerceIn(1, 60)
+
+        // Per-clip trim / split / speed data from the editor timeline.
+        val starts = intent.getLongArrayExtra(MediaEditor.EXTRA_CLIP_STARTS)
+        val ends = intent.getLongArrayExtra(MediaEditor.EXTRA_CLIP_ENDS)
+        val speeds = intent.getFloatArrayExtra(MediaEditor.EXTRA_CLIP_SPEEDS)
+
+        val edits = MediaEditor.editsFrom(
+            uris = uriStrings,
+            imageFlags = imageFlags,
+            defaultImageSeconds = imageDuration,
+            starts = starts,
+            ends = ends,
+            speeds = speeds
+        )
 
         val musicUri = intent.getStringExtra(EXTRA_MUSIC_URI)
             ?.takeIf { it.isNotBlank() }
             ?.let(Uri::parse)
 
-        val imageDuration = (
-            intent.getIntExtra(EXTRA_IMAGE_DURATION, 3)
-        ).coerceIn(1, 60)
-
         exporting = true
 
         try {
-            MediaEditor(applicationContext).export(
-                clips = clips,
+            MediaEditor(applicationContext).exportEdited(
+                edits = edits,
                 musicUri = musicUri,
-                imageDurationSeconds = imageDuration,
                 onProgress = { progress ->
                     val safeProgress = progress.coerceIn(0, 100)
                     notificationManager.notify(
