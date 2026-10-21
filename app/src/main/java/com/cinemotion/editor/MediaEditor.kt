@@ -6,9 +6,9 @@ import android.content.Context
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
-import android.provider.MediaStore
 import android.os.Handler
 import android.os.Looper
+import android.provider.MediaStore
 import androidx.annotation.OptIn
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
@@ -23,6 +23,19 @@ import java.io.FileInputStream
 import java.io.IOException
 import java.util.concurrent.atomic.AtomicBoolean
 
+/**
+ * CineMotion export engine.
+ *
+ * Supports:
+ * - Ordered photos and videos
+ * - A configurable default photo duration
+ * - Per-clip photo durations
+ * - Video start/end trimming
+ * - Optional looping background music
+ * - MP4 export to Movies/CineMotion
+ *
+ * All trim times are in milliseconds.
+ */
 class MediaEditor(private val context: Context) {
 
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -31,6 +44,24 @@ class MediaEditor(private val context: Context) {
         mainHandler.post { action() }
     }
 
+    /**
+     * Per-clip edit settings.
+     *
+     * For photos, durationMs controls display duration.
+     * For videos, startMs and endMs define the retained interval.
+     * Leave endMs null to use the video's natural end.
+     */
+    data class ClipEdit(
+        val uri: Uri,
+        val isImage: Boolean,
+        val durationMs: Long = 3_000L,
+        val startMs: Long = 0L,
+        val endMs: Long? = null
+    )
+
+    /**
+     * Backward-compatible export function for the current MainActivity.
+     */
     @OptIn(UnstableApi::class)
     fun export(
         clips: List<MediaClip>,
@@ -40,7 +71,41 @@ class MediaEditor(private val context: Context) {
         onComplete: (Uri) -> Unit,
         onError: (String) -> Unit
     ) {
-        if (clips.isEmpty()) {
+        val defaultDurationMs =
+            imageDurationSeconds.coerceIn(1, 30) * 1_000L
+
+        val edits = clips.map { clip ->
+            ClipEdit(
+                uri = clip.uri,
+                isImage = clip.isImage,
+                durationMs = defaultDurationMs
+            )
+        }
+
+        exportEdited(
+            edits = edits,
+            musicUri = musicUri,
+            onProgress = onProgress,
+            onComplete = onComplete,
+            onError = onError
+        )
+    }
+
+    /**
+     * Export with individual clip edit settings.
+     *
+     * Call this overload once MainActivity has collected settings
+     * for each timeline clip.
+     */
+    @OptIn(UnstableApi::class)
+    fun exportEdited(
+        edits: List<ClipEdit>,
+        musicUri: Uri?,
+        onProgress: (Int) -> Unit,
+        onComplete: (Uri) -> Unit,
+        onError: (String) -> Unit
+    ) {
+        if (edits.isEmpty()) {
             onMain { onError("Add at least one photo or video first.") }
             return
         }
@@ -60,23 +125,59 @@ class MediaEditor(private val context: Context) {
         }
 
         try {
-            // Verify that each source URI can be opened before rendering.
-            clips.forEach { clip ->
-                context.contentResolver.openFileDescriptor(clip.uri, "r")?.use { }
-                    ?: throw IOException("Cannot open ${clip.displayName}")
-            }
-
-            val editedClips = clips.map { clip ->
-                val itemBuilder = MediaItem.Builder()
-                    .setUri(clip.uri)
-
-                if (clip.isImage) {
-                    itemBuilder.setImageDurationMs(
-                        imageDurationSeconds.coerceIn(1, 30) * 1_000L
+            edits.forEachIndexed { index, edit ->
+                if (edit.durationMs < 1_000L && edit.isImage) {
+                    throw IOException(
+                        "Photo ${index + 1} must last at least one second."
                     )
                 }
 
-                EditedMediaItem.Builder(itemBuilder.build())
+                if (!edit.isImage) {
+                    if (edit.startMs < 0L) {
+                        throw IOException(
+                            "Video ${index + 1} has an invalid start time."
+                        )
+                    }
+
+                    if (edit.endMs != null &&
+                        edit.endMs <= edit.startMs
+                    ) {
+                        throw IOException(
+                            "Video ${index + 1} must end after it starts."
+                        )
+                    }
+                }
+
+                context.contentResolver
+                    .openFileDescriptor(edit.uri, "r")
+                    ?.use { }
+                    ?: throw IOException(
+                        "Cannot open media item ${index + 1}."
+                    )
+            }
+
+            val editedClips = edits.map { edit ->
+                val mediaItemBuilder = MediaItem.Builder()
+                    .setUri(edit.uri)
+
+                if (edit.isImage) {
+                    mediaItemBuilder.setImageDurationMs(
+                        edit.durationMs.coerceIn(1_000L, 300_000L)
+                    )
+                } else {
+                    val clippingBuilder =
+                        MediaItem.ClippingConfiguration.Builder()
+                            .setStartPositionMs(edit.startMs)
+
+                    if (edit.endMs != null) {
+                        clippingBuilder.setEndPositionMs(edit.endMs)
+                    }
+
+                    mediaItemBuilder
+                        .setClippingConfiguration(clippingBuilder.build())
+                }
+
+                EditedMediaItem.Builder(mediaItemBuilder.build())
                     .setFrameRate(30)
                     .setEffects(Effects(emptyList(), emptyList()))
                     .build()
@@ -88,8 +189,12 @@ class MediaEditor(private val context: Context) {
             val sequences = mutableListOf(videoSequence)
 
             if (musicUri != null) {
-                context.contentResolver.openFileDescriptor(musicUri, "r")?.use { }
-                    ?: throw IOException("Cannot open the selected audio file.")
+                context.contentResolver
+                    .openFileDescriptor(musicUri, "r")
+                    ?.use { }
+                    ?: throw IOException(
+                        "Cannot open the selected audio file."
+                    )
 
                 val musicItem = EditedMediaItem.Builder(
                     MediaItem.fromUri(musicUri)
@@ -120,6 +225,7 @@ class MediaEditor(private val context: Context) {
                         try {
                             val savedUri = copyToMovies(outputFile)
                             outputFile.delete()
+
                             onMain {
                                 onProgress(100)
                                 onComplete(savedUri)
@@ -138,7 +244,8 @@ class MediaEditor(private val context: Context) {
                     override fun onError(
                         composition: Composition,
                         exportResult: androidx.media3.transformer.ExportResult,
-                        exportException: androidx.media3.transformer.ExportException
+                        exportException:
+                            androidx.media3.transformer.ExportException
                     ) {
                         fail(
                             "Export failed: " +
@@ -192,7 +299,9 @@ class MediaEditor(private val context: Context) {
             }
 
         val uri = resolver.insert(collection, values)
-            ?: throw IOException("Android could not create the output video.")
+            ?: throw IOException(
+                "Android could not create the output video."
+            )
 
         try {
             val output = resolver.openOutputStream(uri)
