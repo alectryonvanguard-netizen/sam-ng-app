@@ -7,6 +7,8 @@ import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
+import android.os.Handler
+import android.os.Looper
 import androidx.annotation.OptIn
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
@@ -19,8 +21,15 @@ import androidx.media3.transformer.Transformer
 import java.io.File
 import java.io.FileInputStream
 import java.io.IOException
+import java.util.concurrent.atomic.AtomicBoolean
 
 class MediaEditor(private val context: Context) {
+
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    private fun onMain(action: () -> Unit) {
+        mainHandler.post { action() }
+    }
 
     @OptIn(UnstableApi::class)
     fun export(
@@ -32,7 +41,7 @@ class MediaEditor(private val context: Context) {
         onError: (String) -> Unit
     ) {
         if (clips.isEmpty()) {
-            onError("Add at least one photo or video first.")
+            onMain { onError("Add at least one photo or video first.") }
             return
         }
 
@@ -41,18 +50,33 @@ class MediaEditor(private val context: Context) {
             "cinemotion-${System.currentTimeMillis()}.mp4"
         )
 
+        val finished = AtomicBoolean(false)
+
+        fun fail(message: String) {
+            if (finished.compareAndSet(false, true)) {
+                outputFile.delete()
+                onMain { onError(message) }
+            }
+        }
+
         try {
+            // Verify that each source URI can be opened before rendering.
+            clips.forEach { clip ->
+                context.contentResolver.openFileDescriptor(clip.uri, "r")?.use { }
+                    ?: throw IOException("Cannot open ${clip.displayName}")
+            }
+
             val editedClips = clips.map { clip ->
-                val builder = MediaItem.Builder()
+                val itemBuilder = MediaItem.Builder()
                     .setUri(clip.uri)
 
                 if (clip.isImage) {
-                    builder.setImageDurationMs(
+                    itemBuilder.setImageDurationMs(
                         imageDurationSeconds.coerceIn(1, 30) * 1_000L
                     )
                 }
 
-                EditedMediaItem.Builder(builder.build())
+                EditedMediaItem.Builder(itemBuilder.build())
                     .setFrameRate(30)
                     .setEffects(Effects(emptyList(), emptyList()))
                     .build()
@@ -64,6 +88,9 @@ class MediaEditor(private val context: Context) {
             val sequences = mutableListOf(videoSequence)
 
             if (musicUri != null) {
+                context.contentResolver.openFileDescriptor(musicUri, "r")?.use { }
+                    ?: throw IOException("Cannot open the selected audio file.")
+
                 val musicItem = EditedMediaItem.Builder(
                     MediaItem.fromUri(musicUri)
                 ).build()
@@ -88,17 +115,23 @@ class MediaEditor(private val context: Context) {
                         composition: Composition,
                         exportResult: androidx.media3.transformer.ExportResult
                     ) {
+                        if (!finished.compareAndSet(false, true)) return
+
                         try {
                             val savedUri = copyToMovies(outputFile)
                             outputFile.delete()
-                            onProgress(100)
-                            onComplete(savedUri)
+                            onMain {
+                                onProgress(100)
+                                onComplete(savedUri)
+                            }
                         } catch (e: Exception) {
                             outputFile.delete()
-                            onError(
-                                "The video was rendered, but saving failed: " +
-                                    (e.message ?: "unknown error")
-                            )
+                            onMain {
+                                onError(
+                                    "Video rendered, but saving failed: " +
+                                        (e.message ?: "unknown error")
+                                )
+                            }
                         }
                     }
 
@@ -107,22 +140,20 @@ class MediaEditor(private val context: Context) {
                         exportResult: androidx.media3.transformer.ExportResult,
                         exportException: androidx.media3.transformer.ExportException
                     ) {
-                        outputFile.delete()
-                        onError(
+                        fail(
                             "Export failed: " +
                                 (exportException.message
-                                    ?: "unsupported media or codec")
+                                    ?: "Unsupported media or codec")
                         )
                     }
                 })
                 .build()
 
+            onMain { onProgress(1) }
             transformer.start(composition, outputFile.absolutePath)
-            onProgress(1)
 
         } catch (e: Exception) {
-            outputFile.delete()
-            onError(
+            fail(
                 "Could not start export: " +
                     (e.message ?: e.javaClass.simpleName)
             )
@@ -131,6 +162,10 @@ class MediaEditor(private val context: Context) {
 
     @Throws(IOException::class)
     private fun copyToMovies(source: File): Uri {
+        if (!source.exists() || source.length() == 0L) {
+            throw IOException("The rendered video is empty.")
+        }
+
         val resolver = context.contentResolver
         val filename = "CineMotion_${System.currentTimeMillis()}.mp4"
 
@@ -147,13 +182,14 @@ class MediaEditor(private val context: Context) {
             }
         }
 
-        val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            MediaStore.Video.Media.getContentUri(
-                MediaStore.VOLUME_EXTERNAL_PRIMARY
-            )
-        } else {
-            MediaStore.Video.Media.EXTERNAL_CONTENT_URI
-        }
+        val collection =
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                MediaStore.Video.Media.getContentUri(
+                    MediaStore.VOLUME_EXTERNAL_PRIMARY
+                )
+            } else {
+                MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+            }
 
         val uri = resolver.insert(collection, values)
             ?: throw IOException("Android could not create the output video.")
