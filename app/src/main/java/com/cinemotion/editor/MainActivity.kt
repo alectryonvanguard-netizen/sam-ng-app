@@ -1,7 +1,10 @@
 package com.cinemotion.editor
 
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.content.SharedPreferences
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.MediaMetadataRetriever
@@ -24,6 +27,7 @@ import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -32,7 +36,6 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -45,10 +48,13 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.ColorMatrix
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.layout
@@ -66,14 +72,16 @@ import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.math.abs
 import kotlin.math.roundToInt
 
 // ---------------------------------------------------------------------------
-// Palette (matches the mockup: deep navy, violet, cyan accents)
+// Palette
 // ---------------------------------------------------------------------------
 private val CMBackground = Color(0xFF0A1020)
 private val CMSurface = Color(0xFF121A2E)
@@ -87,30 +95,23 @@ private val CMBlue = Color(0xFF3C86FF)
 private val CMText = Color(0xFFF1F7FA)
 private val CMMuted = Color(0xFF8E9BB5)
 
+private val CMBrand = Brush.horizontalGradient(listOf(Color(0xFF5B4DFF), Color(0xFF3C86FF)))
+
 private val DP_PER_SEC = 28.dp
 
 private const val SEL_NONE = 0
 private const val SEL_CLIP = 1
 private const val SEL_MUSIC = 2
 private const val SEL_OVERLAY = 3
+private const val GLOBAL_EFFECT_ID = -2L
 
 private const val KIND_TEXT = 0
 private const val KIND_STICKER = 1
 private const val KIND_EFFECT = 2
 
-// Extra keys for the newer per-clip data. ExportService can read these once updated.
-private const val EXTRA_CLIP_STARTS = "com.cinemotion.editor.extra.CLIP_STARTS"
-private const val EXTRA_CLIP_ENDS = "com.cinemotion.editor.extra.CLIP_ENDS"
-private const val EXTRA_CLIP_SPEEDS = "com.cinemotion.editor.extra.CLIP_SPEEDS"
+private enum class CMPage { HOME, EDITOR, TEMPLATES, PROJECTS, SETTINGS }
 
-private enum class CMPage {
-    HOME, EDITOR, TEMPLATES, DRAFTS, COMPLETED, SETTINGS
-}
-
-private data class CMExport(
-    val title: String,
-    val uri: String
-)
+private data class CMExport(val title: String, val uri: String)
 
 private class ExportRequest(
     val clips: List<MediaClip>,
@@ -118,18 +119,87 @@ private class ExportRequest(
     val imageSeconds: Int,
     val starts: LongArray,
     val ends: LongArray,
-    val speeds: FloatArray
+    val speeds: FloatArray,
+    val transitions: List<String>,
+    val heightPx: Int,
+    val fps: Int,
+    val transitionMs: Int
 )
+
+private class Template(
+    val name: String,
+    val sub: String,
+    val tag: String,
+    val glyph: String,
+    val colors: List<Color>,
+    val effect: String?,
+    val transition: String,
+    val title: String?,
+    val beat: Boolean
+)
+
+private val TEMPLATES = listOf(
+    Template("Summer Vibes", "Warm sunset tones", "Trending", "☀",
+        listOf(Color(0xFFFF8A5B), Color(0xFF8B3FE0)), "Warm", "Crossfade", "Good Vibes", false),
+    Template("Beat Drop", "Cuts land on every beat", "Beat Sync", "♪",
+        listOf(Color(0xFF3C86FF), Color(0xFF8B3FE0)), "Vivid", "Whip Pan", null, true),
+    Template("Cinematic Story", "Moody film look", "Cinematic", "✦",
+        listOf(Color(0xFF134E5E), Color(0xFF0A1020)), "Vintage", "Fade", "Cinematic Story", false),
+    Template("Travel Reel", "Vivid journey clips", "Travel", "✈",
+        listOf(Color(0xFF35E0D0), Color(0xFF3C86FF)), "Vivid", "Slide", "Travel Diaries", false),
+    Template("Photo Montage", "Soft dissolves for stills", "Photo", "▣",
+        listOf(Color(0xFFFFC36B), Color(0xFFE0457B)), "Warm", "Dissolve", null, false),
+    Template("Zoom Party", "Zoom cuts on the beat", "Beat Sync", "◎",
+        listOf(Color(0xFFE0457B), Color(0xFF5B3FE0)), "Vivid", "Zoom", null, true),
+    Template("Noir", "Black and white drama", "Cinematic", "◐",
+        listOf(Color(0xFF3A3F4B), Color(0xFF0A0D14)), "B&W", "Fade", "Noir", false),
+    Template("Memories", "Vintage photo slideshow", "Photo", "❤",
+        listOf(Color(0xFFB57BFF), Color(0xFF3C4BAE)), "Vintage", "Dissolve", "Memories", false)
+)
+
+// ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
+private class AppSettings(private val prefs: SharedPreferences) {
+    var quality by mutableStateOf(prefs.getString("quality", "1080p") ?: "1080p")
+    var fps by mutableIntStateOf(prefs.getInt("fps", 30))
+    var photoSec by mutableIntStateOf(prefs.getInt("photo_sec", 3))
+    var transitionMs by mutableIntStateOf(prefs.getInt("transition_ms", 600))
+    var autoBeat by mutableStateOf(prefs.getBoolean("auto_beat", true))
+
+    fun save() {
+        prefs.edit()
+            .putString("quality", quality)
+            .putInt("fps", fps)
+            .putInt("photo_sec", photoSec)
+            .putInt("transition_ms", transitionMs)
+            .putBoolean("auto_beat", autoBeat)
+            .apply()
+    }
+
+    val heightPx: Int
+        get() = when (quality) {
+            "720p" -> 720
+            "4K" -> 2160
+            else -> 1080
+        }
+}
 
 // ---------------------------------------------------------------------------
 // Editor state
 // ---------------------------------------------------------------------------
-private class TLClip(val clip: MediaClip, val uid: Long, endInit: Long) {
+private class TLClip(
+    val clip: MediaClip,
+    val uid: Long,
+    endInit: Long,
+    initialTransition: String = "None"
+) {
     var startMs by mutableLongStateOf(0L)
     var endMs by mutableLongStateOf(endInit)
     var sourceMs by mutableLongStateOf(endInit)
+    var durationKnown by mutableStateOf(false)
     var speed by mutableFloatStateOf(1f)
-    var transition by mutableStateOf("None")
+    var transition by mutableStateOf(initialTransition)
     var thumb by mutableStateOf<Bitmap?>(null)
 
     val lengthMs: Long
@@ -150,6 +220,12 @@ private class Overlay(
 private class EditorState {
     val clips = mutableStateListOf<TLClip>()
     val overlays = mutableStateListOf<Overlay>()
+    val beats = mutableStateListOf<Long>()
+    var beatBpm by mutableFloatStateOf(0f)
+    var beatStatus by mutableStateOf("")
+    var transitionMs by mutableLongStateOf(600L)
+    var defaultTransition by mutableStateOf("None")
+    var globalEffect by mutableStateOf<String?>(null)
     var musicUri by mutableStateOf<Uri?>(null)
     var positionMs by mutableLongStateOf(0L)
     var playing by mutableStateOf(false)
@@ -204,8 +280,16 @@ private class EditorState {
     fun selectionLabel(): String = when (selKind) {
         SEL_CLIP -> "Clip ${clips.indexOfFirst { it.uid == selId } + 1}"
         SEL_MUSIC -> "Music"
-        SEL_OVERLAY -> overlays.firstOrNull { it.uid == selId }?.label ?: "Item"
+        SEL_OVERLAY ->
+            if (selId == GLOBAL_EFFECT_ID) "Effect: ${globalEffect ?: ""}"
+            else overlays.firstOrNull { it.uid == selId }?.label ?: "Item"
         else -> ""
+    }
+
+    fun addBeat(ms: Long) {
+        if (beats.any { abs(it - ms) < 80L }) return
+        val i = beats.indexOfFirst { it > ms }
+        if (i < 0) beats.add(ms) else beats.add(i, ms)
     }
 
     fun split(): String {
@@ -216,12 +300,12 @@ private class EditorState {
             return "Move the playhead inside a clip to split it"
         }
         val cut = c.startMs + (local * c.speed).toLong()
-        val second = TLClip(c.clip, newId(), c.endMs).also {
+        val second = TLClip(c.clip, newId(), c.endMs, c.transition).also {
             it.startMs = cut
             it.sourceMs = c.sourceMs
+            it.durationKnown = c.durationKnown
             it.speed = c.speed
             it.thumb = c.thumb
-            it.transition = c.transition
         }
         c.endMs = cut
         c.transition = "None"
@@ -229,6 +313,45 @@ private class EditorState {
         selKind = SEL_CLIP
         selId = second.uid
         return "Clip split at playhead"
+    }
+
+    /** Snap every cut to the beat grid (every [every] beats). */
+    fun syncToBeats(every: Int): String {
+        if (clips.isEmpty()) return "Add media first"
+        if (beats.size < 2) return "Detect or add beats first"
+
+        val sorted = beats.sorted()
+        val diffs = sorted.zipWithNext { a, b -> b - a }.sorted()
+        val interval = diffs[diffs.size / 2].coerceAtLeast(200L)
+
+        val grid = ArrayList<Long>(sorted)
+        var last = grid.last()
+        val need = totalMs + 120_000L
+        while (last < need) {
+            last += interval
+            grid.add(last)
+        }
+        val bounds = grid.filterIndexed { i, _ -> i % every.coerceAtLeast(1) == 0 }
+
+        var cursor = 0L
+        clips.forEach { c ->
+            if (c.clip.isImage) {
+                val next = bounds.firstOrNull { it >= cursor + 1000L } ?: (cursor + 3000L)
+                c.endMs = c.startMs + (next - cursor)
+                cursor = next
+            } else {
+                val len = c.lengthMs
+                val fit = bounds.lastOrNull { it <= cursor + len && it >= cursor + 1000L }
+                if (fit != null) {
+                    c.endMs = c.startMs + ((fit - cursor) * c.speed).toLong()
+                    cursor = fit
+                } else {
+                    cursor += len
+                }
+            }
+        }
+        seekTo(positionMs)
+        return "Cuts synced to the beat"
     }
 
     fun deleteSelected(): String {
@@ -242,7 +365,8 @@ private class EditorState {
                 "Music removed"
             }
             SEL_OVERLAY -> {
-                overlays.removeAll { it.uid == selId }
+                if (selId == GLOBAL_EFFECT_ID) globalEffect = null
+                else overlays.removeAll { it.uid == selId }
                 "Item removed"
             }
             else -> "Nothing selected"
@@ -256,6 +380,11 @@ private class EditorState {
     fun reset() {
         clips.clear()
         overlays.clear()
+        beats.clear()
+        beatBpm = 0f
+        beatStatus = ""
+        defaultTransition = "None"
+        globalEffect = null
         musicUri = null
         positionMs = 0L
         playing = false
@@ -357,6 +486,7 @@ private fun effectFilter(name: String?): ColorFilter? {
 
 private fun serializeDraft(ed: EditorState): String = buildString {
     ed.musicUri?.let { append("M\t").append(it).append('\n') }
+    if (ed.beats.isNotEmpty()) append("B\t").append(ed.beats.joinToString(",")).append('\n')
     ed.clips.forEach { c ->
         val name = c.clip.displayName.replace('\t', ' ').replace('\n', ' ')
         append("C\t${c.clip.uri}\t${if (c.clip.isImage) 1 else 0}\t${c.clip.mimeType}\t$name")
@@ -367,6 +497,14 @@ private fun serializeDraft(ed: EditorState): String = buildString {
         append("O\t${o.kind}\t$label\t${o.startMs}\t${o.lengthMs}\n")
     }
 }
+
+private fun loadExportList(prefs: SharedPreferences): List<CMExport> =
+    (prefs.getString("exports", "") ?: "")
+        .lines()
+        .mapNotNull { line ->
+            val p = line.split('\t')
+            if (p.size >= 2 && p[0].isNotBlank()) CMExport(p[1], p[0]) else null
+        }
 
 // ---------------------------------------------------------------------------
 // Activity
@@ -420,10 +558,16 @@ class MainActivity : ComponentActivity() {
                                     req.imageSeconds
                                 )
 
-                                // Per-clip trim / speed data (read by an updated ExportService)
-                                putExtra(EXTRA_CLIP_STARTS, req.starts)
-                                putExtra(EXTRA_CLIP_ENDS, req.ends)
-                                putExtra(EXTRA_CLIP_SPEEDS, req.speeds)
+                                putExtra(MediaEditor.EXTRA_CLIP_STARTS, req.starts)
+                                putExtra(MediaEditor.EXTRA_CLIP_ENDS, req.ends)
+                                putExtra(MediaEditor.EXTRA_CLIP_SPEEDS, req.speeds)
+                                putStringArrayListExtra(
+                                    MediaEditor.EXTRA_CLIP_TRANSITIONS,
+                                    ArrayList(req.transitions)
+                                )
+                                putExtra(MediaEditor.EXTRA_HEIGHT, req.heightPx)
+                                putExtra(MediaEditor.EXTRA_FPS, req.fps)
+                                putExtra(MediaEditor.EXTRA_TRANSITION_MS, req.transitionMs)
                             }
 
                         try {
@@ -457,20 +601,26 @@ private fun CineMotionApp(
         context.getSharedPreferences("cinemotion_main", Context.MODE_PRIVATE)
     }
 
+    val settings = remember { AppSettings(prefs) }
     val ed = remember { EditorState() }
 
     var page by remember { mutableStateOf(CMPage.HOME) }
-    var exportQuality by remember {
-        mutableStateOf(prefs.getString("quality", "1080p") ?: "1080p")
-    }
     var isExporting by remember { mutableStateOf(false) }
+    var confirmNew by remember { mutableStateOf(false) }
+    var pendingAudio by remember { mutableStateOf(false) }
+    var autoSync by remember { mutableStateOf(false) }
+    var launchAudioNow by remember { mutableStateOf(false) }
 
     val draftNames = remember {
         mutableStateListOf<String>().apply {
             addAll(prefs.getStringSet("draft_names", emptySet())?.toList() ?: emptyList())
         }
     }
-    val completedExports = remember { mutableStateListOf<CMExport>() }
+    val completedExports = remember {
+        mutableStateListOf<CMExport>().apply { addAll(loadExportList(prefs)) }
+    }
+
+    SideEffect { ed.transitionMs = settings.transitionMs.toLong() }
 
     fun notify(text: String) {
         Toast.makeText(context, text, Toast.LENGTH_SHORT).show()
@@ -482,7 +632,35 @@ private fun CineMotionApp(
             tl.thumb = bmp
             if (!tl.clip.isImage && dur > 0L) {
                 tl.sourceMs = dur
+                tl.durationKnown = true
                 if (fixDuration) tl.endMs = dur
+            }
+        }
+    }
+
+    fun detectBeats() {
+        val uri = ed.musicUri
+        if (uri == null) {
+            notify("Add music first")
+            return
+        }
+        ed.beatStatus = "Analyzing beats…"
+        scope.launch {
+            val r = withContext(Dispatchers.Default) { BeatDetector.detect(context, uri) }
+            if (r == null) {
+                ed.beatStatus = "Couldn't find a steady beat"
+                autoSync = false
+                notify("Couldn't detect beats in this track")
+            } else {
+                ed.beats.clear()
+                ed.beats.addAll(r.beatsMs)
+                ed.beatBpm = r.bpm
+                ed.beatStatus = ""
+                notify("${r.bpm.roundToInt()} BPM detected")
+                if (autoSync) {
+                    autoSync = false
+                    notify(ed.syncToBeats(2))
+                }
             }
         }
     }
@@ -511,13 +689,18 @@ private fun CineMotionApp(
                 val tl = TLClip(
                     MediaClip(uri = uri, displayName = name, isImage = isImage, mimeType = mime),
                     ed.newId(),
-                    3_000L
+                    if (isImage) settings.photoSec * 1000L else 3_000L,
+                    ed.defaultTransition
                 )
                 ed.clips.add(tl)
                 loadInto(tl, fixDuration = true)
             }
             page = CMPage.EDITOR
             notify("${uris.size} item(s) added")
+            if (pendingAudio) {
+                pendingAudio = false
+                launchAudioNow = true
+            }
         }
     }
 
@@ -535,8 +718,20 @@ private fun CineMotionApp(
             }
             ed.musicUri = uri
             ed.selKind = SEL_MUSIC
+            ed.beats.clear()
+            ed.beatBpm = 0f
             page = CMPage.EDITOR
             notify("Audio added")
+            if (settings.autoBeat || autoSync) detectBeats()
+        } else {
+            autoSync = false
+        }
+    }
+
+    LaunchedEffect(launchAudioNow) {
+        if (launchAudioNow) {
+            launchAudioNow = false
+            audioPicker.launch(arrayOf("audio/*"))
         }
     }
 
@@ -557,6 +752,9 @@ private fun CineMotionApp(
         notify("$draftName saved")
     }
 
+    fun clipCountOf(name: String): Int =
+        (prefs.getString("draft_data_$name", "") ?: "").lines().count { it.startsWith("C\t") }
+
     fun openDraft(name: String) {
         val data = prefs.getString("draft_data_$name", null)
         ed.reset()
@@ -569,14 +767,16 @@ private fun CineMotionApp(
             val p = line.split('\t')
             when (p.getOrNull(0)) {
                 "M" -> if (p.size >= 2) ed.musicUri = Uri.parse(p[1])
+                "B" -> if (p.size >= 2) {
+                    ed.beats.addAll(p[1].split(',').mapNotNull { it.toLongOrNull() })
+                }
                 "C" -> if (p.size >= 9) {
                     val isImage = p[2] == "1"
                     val clip = MediaClip(Uri.parse(p[1]), p[4], isImage, p[3])
                     val end = p[6].toLongOrNull() ?: 3_000L
-                    val tl = TLClip(clip, ed.newId(), end)
+                    val tl = TLClip(clip, ed.newId(), end, p[8])
                     tl.startMs = p[5].toLongOrNull() ?: 0L
                     tl.speed = p[7].toFloatOrNull() ?: 1f
-                    tl.transition = p[8]
                     ed.clips.add(tl)
                     loadInto(tl, fixDuration = false)
                 }
@@ -612,8 +812,15 @@ private fun CineMotionApp(
                 music = ed.musicUri,
                 imageSeconds = seconds,
                 starts = LongArray(list.size) { list[it].startMs },
-                ends = LongArray(list.size) { list[it].endMs },
-                speeds = FloatArray(list.size) { list[it].speed }
+                ends = LongArray(list.size) {
+                    val c = list[it]
+                    if (!c.clip.isImage && !c.durationKnown) -1L else c.endMs
+                },
+                speeds = FloatArray(list.size) { list[it].speed },
+                transitions = list.map { it.transition },
+                heightPx = settings.heightPx,
+                fps = settings.fps,
+                transitionMs = settings.transitionMs
             )
         )
 
@@ -625,33 +832,95 @@ private fun CineMotionApp(
         }
     }
 
-    fun applyTemplate(name: String) {
-        ed.overlays.removeAll { it.kind == KIND_EFFECT }
-        ed.overlays.removeAll { it.kind == KIND_TEXT && it.label == name }
-        ed.overlays.add(Overlay(ed.newId(), KIND_TEXT, name, 0L, 3_000L))
-        val fx = when (name) {
-            "Cinematic Story" -> "Vintage"
-            "Travel Reel" -> "Vivid"
-            "Photo Montage" -> "Warm"
-            else -> null
-        }
-        if (fx != null) {
-            ed.overlays.add(
-                Overlay(ed.newId(), KIND_EFFECT, fx, 0L, maxOf(ed.totalMs, 5_000L))
-            )
+    fun startProject(kind: String) {
+        ed.reset()
+        when (kind) {
+            "Slideshow" -> ed.defaultTransition = "Crossfade"
+            "Beat Sync" -> {
+                ed.defaultTransition = "Whip Pan"
+                pendingAudio = true
+                autoSync = true
+            }
         }
         page = CMPage.EDITOR
-        if (ed.clips.isEmpty()) {
-            mediaPicker.launch(arrayOf("image/*", "video/*"))
-        } else if (name == "Music Video" && ed.musicUri == null) {
-            audioPicker.launch(arrayOf("audio/*"))
+        mediaPicker.launch(arrayOf("image/*", "video/*"))
+    }
+
+    fun applyTemplate(t: Template) {
+        ed.reset()
+        ed.defaultTransition = t.transition
+        ed.globalEffect = t.effect
+        t.title?.let { ed.overlays.add(Overlay(ed.newId(), KIND_TEXT, it, 0L, 3_000L)) }
+        if (t.beat) {
+            pendingAudio = true
+            autoSync = true
         }
-        notify("$name template applied")
+        page = CMPage.EDITOR
+        mediaPicker.launch(arrayOf("image/*", "video/*"))
+        notify("${t.name} template applied")
+    }
+
+    fun deleteDraft(name: String) {
+        draftNames.remove(name)
+        prefs.edit()
+            .putStringSet("draft_names", draftNames.toSet())
+            .remove("draft_data_$name")
+            .apply()
+    }
+
+    fun clearDrafts() {
+        val e = prefs.edit()
+        draftNames.forEach { e.remove("draft_data_$it") }
+        e.putStringSet("draft_names", emptySet()).apply()
+        draftNames.clear()
+        notify("All drafts cleared")
+    }
+
+    fun clearExports() {
+        prefs.edit().remove("exports").apply()
+        completedExports.clear()
+        notify("Export history cleared")
+    }
+
+    // Export result broadcasts from ExportService
+    DisposableEffect(Unit) {
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(c: Context?, i: Intent?) {
+                when (i?.action) {
+                    ExportService.ACTION_EXPORT_COMPLETE -> {
+                        isExporting = false
+                        completedExports.clear()
+                        completedExports.addAll(loadExportList(prefs))
+                        Toast.makeText(
+                            context,
+                            "Export saved to Movies/CineMotion",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                    ExportService.ACTION_EXPORT_FAILED -> {
+                        isExporting = false
+                        Toast.makeText(
+                            context,
+                            "Export failed: ${i.getStringExtra(ExportService.EXTRA_ERROR) ?: "unknown error"}",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                }
+            }
+        }
+        val filter = IntentFilter().apply {
+            addAction(ExportService.ACTION_EXPORT_COMPLETE)
+            addAction(ExportService.ACTION_EXPORT_FAILED)
+        }
+        ContextCompat.registerReceiver(
+            context, receiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+        onDispose { try { context.unregisterReceiver(receiver) } catch (_: Exception) { } }
     }
 
     LaunchedEffect(isExporting) {
         if (isExporting) {
-            delay(5_000)
+            delay(180_000)
             isExporting = false
         }
     }
@@ -669,49 +938,23 @@ private fun CineMotionApp(
         containerColor = CMBackground,
         bottomBar = {
             if (page != CMPage.EDITOR) {
-                NavigationBar(
-                    containerColor = Color(0xFF0C1322),
-                    contentColor = CMText,
-                    tonalElevation = 0.dp,
-                    modifier = Modifier.padding(bottom = 8.dp)
-                ) {
-                    NavigationBarItem(
-                        selected = page == CMPage.HOME,
-                        onClick = { page = CMPage.HOME },
-                        icon = { Text("⌂", fontSize = 22.sp) },
-                        label = { Text("Home") }
-                    )
-                    NavigationBarItem(
-                        selected = page == CMPage.TEMPLATES,
-                        onClick = { page = CMPage.TEMPLATES },
-                        icon = { Text("✦", fontSize = 20.sp) },
-                        label = { Text("Templates") }
-                    )
-                    NavigationBarItem(
-                        selected = page == CMPage.DRAFTS,
-                        onClick = { page = CMPage.DRAFTS },
-                        icon = { Text("▤", fontSize = 20.sp) },
-                        label = { Text("Drafts") },
-                        enabled = draftNames.isNotEmpty()
-                    )
-                    NavigationBarItem(
-                        selected = page == CMPage.COMPLETED,
-                        onClick = { page = CMPage.COMPLETED },
-                        icon = { Text("✓", fontSize = 20.sp) },
-                        label = { Text("Completed") }
-                    )
-                    NavigationBarItem(
-                        selected = page == CMPage.SETTINGS,
-                        onClick = { page = CMPage.SETTINGS },
-                        icon = { Text("⚙", fontSize = 20.sp) },
-                        label = { Text("Settings") }
-                    )
-                }
+                BottomBar(
+                    page = page,
+                    onSelect = { page = it },
+                    onCreate = {
+                        if (ed.clips.isEmpty()) startProject("Video") else confirmNew = true
+                    }
+                )
             }
         }
     ) { innerPadding ->
-        if (page == CMPage.EDITOR) {
-            EditorScreen(
+        val pageModifier = Modifier
+            .fillMaxSize()
+            .background(CMBackground)
+            .padding(innerPadding)
+
+        when (page) {
+            CMPage.EDITOR -> EditorScreen(
                 ed = ed,
                 isExporting = isExporting,
                 onBack = { page = CMPage.HOME },
@@ -719,100 +962,1069 @@ private fun CineMotionApp(
                 onAddAudio = { audioPicker.launch(arrayOf("audio/*")) },
                 onSaveDraft = { saveDraft() },
                 onExport = { startExport() },
+                onDetectBeats = { detectBeats() },
                 notify = { notify(it) },
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(CMBackground)
-                    .padding(innerPadding)
+                modifier = pageModifier
             )
-        } else {
-            Column(
+
+            CMPage.HOME -> HomePage(
+                clipCount = ed.clips.size,
+                totalMs = ed.totalMs,
+                drafts = draftNames,
+                clipCountOf = { clipCountOf(it) },
+                isExporting = isExporting,
+                onNew = { if (ed.clips.isEmpty()) startProject("Video") else confirmNew = true },
+                onContinue = { page = CMPage.EDITOR },
+                onQuick = { kind ->
+                    if (kind == "Templates") page = CMPage.TEMPLATES else startProject(kind)
+                },
+                onTemplate = { applyTemplate(it) },
+                onOpenDraft = { openDraft(it) },
+                onSettings = { page = CMPage.SETTINGS },
+                onAllTemplates = { page = CMPage.TEMPLATES },
+                onAllProjects = { page = CMPage.PROJECTS },
+                modifier = pageModifier
+            )
+
+            CMPage.TEMPLATES -> TemplatesPage(
+                onUse = { applyTemplate(it) },
+                modifier = pageModifier
+            )
+
+            CMPage.PROJECTS -> ProjectsPage(
+                drafts = draftNames,
+                exports = completedExports,
+                clipCountOf = { clipCountOf(it) },
+                onOpen = { openDraft(it) },
+                onDelete = { deleteDraft(it) },
+                onNew = { if (ed.clips.isEmpty()) startProject("Video") else confirmNew = true },
+                modifier = pageModifier
+            )
+
+            CMPage.SETTINGS -> SettingsPage(
+                settings = settings,
+                draftCount = draftNames.size,
+                exportCount = completedExports.size,
+                onClearDrafts = { clearDrafts() },
+                onClearExports = { clearExports() },
+                modifier = pageModifier
+            )
+        }
+    }
+
+    if (confirmNew) {
+        AlertDialog(
+            onDismissRequest = { confirmNew = false },
+            containerColor = CMSurface,
+            title = { Text("Start a new project?", color = CMText) },
+            text = {
+                Text(
+                    "Your current timeline will be cleared. Save it as a draft first if you want to keep it.",
+                    color = CMMuted
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmNew = false
+                    startProject("Video")
+                }) { Text("New project", color = CMTeal) }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmNew = false }) {
+                    Text("Cancel", color = CMMuted)
+                }
+            }
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Bottom navigation
+// ---------------------------------------------------------------------------
+@Composable
+private fun BottomBar(
+    page: CMPage,
+    onSelect: (CMPage) -> Unit,
+    onCreate: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color(0xFF0C1322))
+            .padding(top = 6.dp, bottom = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        NavItem("⌂", "Home", page == CMPage.HOME, Modifier.weight(1f)) { onSelect(CMPage.HOME) }
+        NavItem("✦", "Templates", page == CMPage.TEMPLATES, Modifier.weight(1f)) {
+            onSelect(CMPage.TEMPLATES)
+        }
+
+        Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+            Box(
                 modifier = Modifier
-                    .fillMaxSize()
-                    .background(CMBackground)
-                    .padding(innerPadding)
-                    .padding(horizontal = 16.dp)
+                    .size(54.dp)
+                    .clip(CircleShape)
+                    .background(CMBrand)
+                    .clickable(onClick = onCreate),
+                contentAlignment = Alignment.Center
             ) {
-                Spacer(modifier = Modifier.height(12.dp))
+                Text("+", color = Color.White, fontSize = 30.sp, fontWeight = FontWeight.Light)
+            }
+        }
 
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = buildAnnotatedString {
-                                withStyle(SpanStyle(color = CMText)) { append("Cine") }
-                                withStyle(SpanStyle(color = CMTeal)) { append("Motion") }
-                            },
-                            fontSize = 27.sp,
-                            fontWeight = FontWeight.ExtraBold
-                        )
-                        Text(
-                            text = "CREATE • EDIT • EXPORT",
-                            color = CMTeal,
-                            fontSize = 10.sp,
-                            letterSpacing = 2.sp
-                        )
-                    }
+        NavItem("▤", "Projects", page == CMPage.PROJECTS, Modifier.weight(1f)) {
+            onSelect(CMPage.PROJECTS)
+        }
+        NavItem("⚙", "Settings", page == CMPage.SETTINGS, Modifier.weight(1f)) {
+            onSelect(CMPage.SETTINGS)
+        }
+    }
+}
 
-                    Surface(shape = RoundedCornerShape(14.dp), color = CMSurface) {
+@Composable
+private fun NavItem(
+    glyph: String,
+    label: String,
+    selected: Boolean,
+    modifier: Modifier,
+    onClick: () -> Unit
+) {
+    Column(
+        modifier = modifier
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(onClick = onClick)
+            .padding(vertical = 4.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(glyph, color = if (selected) CMTeal else CMMuted, fontSize = 21.sp)
+        Text(label, color = if (selected) CMTeal else CMMuted, fontSize = 10.sp, maxLines = 1)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Home
+// ---------------------------------------------------------------------------
+@Composable
+private fun BrandTitle(size: Int = 22) {
+    Text(
+        text = buildAnnotatedString {
+            withStyle(SpanStyle(color = CMText)) { append("Cine") }
+            withStyle(SpanStyle(color = CMTeal)) { append("Motion") }
+        },
+        fontSize = size.sp,
+        fontWeight = FontWeight.ExtraBold
+    )
+}
+
+@Composable
+private fun BrandMark(boxSize: Dp = 36.dp) {
+    Box(
+        modifier = Modifier
+            .size(boxSize)
+            .clip(RoundedCornerShape(10.dp))
+            .background(Brush.linearGradient(listOf(CMTeal, CMBlue, CMPurple))),
+        contentAlignment = Alignment.Center
+    ) { PlayerIcon("play", Color.White, boxSize * 0.45f) }
+}
+
+@Composable
+private fun SectionHeader(title: String, action: String? = null, onAction: () -> Unit = {}) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            title,
+            color = CMText,
+            fontSize = 17.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.weight(1f)
+        )
+        if (action != null) {
+            Text(
+                action,
+                color = CMTeal,
+                fontSize = 13.sp,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable(onClick = onAction)
+                    .padding(horizontal = 8.dp, vertical = 4.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun HomePage(
+    clipCount: Int,
+    totalMs: Long,
+    drafts: List<String>,
+    clipCountOf: (String) -> Int,
+    isExporting: Boolean,
+    onNew: () -> Unit,
+    onContinue: () -> Unit,
+    onQuick: (String) -> Unit,
+    onTemplate: (Template) -> Unit,
+    onOpenDraft: (String) -> Unit,
+    onSettings: () -> Unit,
+    onAllTemplates: () -> Unit,
+    onAllProjects: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    LazyColumn(
+        modifier = modifier,
+        verticalArrangement = Arrangement.spacedBy(18.dp),
+        contentPadding = PaddingValues(bottom = 20.dp)
+    ) {
+        item {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                BrandMark()
+                Spacer(Modifier.width(10.dp))
+                Column(Modifier.weight(1f)) {
+                    BrandTitle()
+                    Text("Create • Edit • Export", color = CMMuted, fontSize = 11.sp)
+                }
+                Box(
+                    modifier = Modifier
+                        .size(40.dp)
+                        .clip(CircleShape)
+                        .background(CMSurface)
+                        .clickable(onClick = onSettings),
+                    contentAlignment = Alignment.Center
+                ) { Text("⚙", color = CMText, fontSize = 18.sp) }
+            }
+        }
+
+        // Hero
+        item {
+            Box(
+                modifier = Modifier
+                    .padding(horizontal = 16.dp)
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(24.dp))
+                    .background(
+                        Brush.linearGradient(
+                            listOf(Color(0xFF4B34D8), Color(0xFF2F6BE8), Color(0xFF1DB8C8))
+                        )
+                    )
+                    .padding(22.dp)
+            ) {
+                Column {
+                    Text(
+                        "NEW PROJECT",
+                        color = Color(0xCCFFFFFF),
+                        fontSize = 11.sp,
+                        letterSpacing = 1.5.sp
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "Make every frame matter.",
+                        color = Color.White,
+                        fontSize = 26.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        "Mix photos, videos and music with transitions and beat sync.",
+                        color = Color(0xCCFFFFFF),
+                        fontSize = 13.sp
+                    )
+                    Spacer(Modifier.height(18.dp))
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(Color.White)
+                            .clickable(onClick = onNew)
+                            .padding(horizontal = 22.dp, vertical = 12.dp)
+                    ) {
                         Text(
-                            text = "CM",
-                            color = CMTeal,
-                            fontSize = 20.sp,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier.padding(horizontal = 15.dp, vertical = 11.dp)
+                            "+  Create project",
+                            color = Color(0xFF2A2A6A),
+                            fontWeight = FontWeight.Bold
                         )
                     }
                 }
+            }
+        }
 
-                Spacer(modifier = Modifier.height(18.dp))
+        // Quick start
+        item {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                listOf(
+                    Triple("Video", "▶", CMBlue),
+                    Triple("Slideshow", "▣", CMAmber),
+                    Triple("Beat Sync", "♪", CMTeal),
+                    Triple("Templates", "✦", CMPurple)
+                ).forEach { (name, glyph, color) ->
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(CMSurface)
+                            .clickable { onQuick(name) }
+                            .padding(vertical = 14.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(40.dp)
+                                .clip(CircleShape)
+                                .background(color.copy(alpha = 0.18f)),
+                            contentAlignment = Alignment.Center
+                        ) { Text(glyph, color = color, fontSize = 18.sp) }
+                        Spacer(Modifier.height(8.dp))
+                        Text(name, color = CMText, fontSize = 11.sp, maxLines = 1)
+                    }
+                }
+            }
+        }
 
-                when (page) {
-                    CMPage.HOME -> HomePage(
-                        clipCount = ed.clips.size,
-                        onCreate = { mediaPicker.launch(arrayOf("image/*", "video/*")) },
-                        onOpenEditor = { page = CMPage.EDITOR },
-                        onTemplates = { page = CMPage.TEMPLATES },
-                        onSettings = { page = CMPage.SETTINGS }
+        if (isExporting) {
+            item {
+                Row(
+                    modifier = Modifier
+                        .padding(horizontal = 16.dp)
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(CMSurface)
+                        .padding(14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp),
+                        strokeWidth = 2.dp,
+                        color = CMTeal
                     )
+                    Spacer(Modifier.width(12.dp))
+                    Text("Exporting your video in the background…", color = CMText, fontSize = 13.sp)
+                }
+            }
+        }
 
-                    CMPage.TEMPLATES -> TemplatesPage(onUseTemplate = { applyTemplate(it) })
+        if (clipCount > 0) {
+            item {
+                Row(
+                    modifier = Modifier
+                        .padding(horizontal = 16.dp)
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(CMSurface)
+                        .clickable(onClick = onContinue)
+                        .padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Continue editing", color = CMText, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            "$clipCount clips · ${fmt(totalMs)}",
+                            color = CMMuted,
+                            fontSize = 12.sp
+                        )
+                    }
+                    Text("›", color = CMTeal, fontSize = 28.sp)
+                }
+            }
+        }
 
-                    CMPage.DRAFTS -> DraftsPage(
-                        drafts = draftNames,
-                        onOpen = { openDraft(it) },
-                        onDelete = { name ->
-                            draftNames.remove(name)
-                            prefs.edit()
-                                .putStringSet("draft_names", draftNames.toSet())
-                                .remove("draft_data_$name")
-                                .apply()
-                            if (draftNames.isEmpty()) page = CMPage.HOME
+        // Recent projects
+        item {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                SectionHeader(
+                    "Recent projects",
+                    if (drafts.isNotEmpty()) "See all" else null,
+                    onAllProjects
+                )
+                if (drafts.isEmpty()) {
+                    Text(
+                        "Saved drafts will show up here.",
+                        color = CMMuted,
+                        fontSize = 13.sp,
+                        modifier = Modifier.padding(horizontal = 16.dp)
+                    )
+                } else {
+                    LazyRow(
+                        contentPadding = PaddingValues(horizontal = 16.dp),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        items(drafts.reversed(), key = { it }) { name ->
+                            Column(
+                                modifier = Modifier
+                                    .width(150.dp)
+                                    .clip(RoundedCornerShape(16.dp))
+                                    .background(CMSurface)
+                                    .clickable { onOpenDraft(name) }
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(90.dp)
+                                        .background(
+                                            Brush.linearGradient(
+                                                listOf(Color(0xFF26346B), Color(0xFF4B34D8))
+                                            )
+                                        ),
+                                    contentAlignment = Alignment.Center
+                                ) { PlayerIcon("play", Color(0xCCFFFFFF), 26.dp) }
+                                Column(Modifier.padding(12.dp)) {
+                                    Text(name, color = CMText, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                                    Text(
+                                        "${clipCountOf(name)} clips",
+                                        color = CMMuted,
+                                        fontSize = 12.sp
+                                    )
+                                }
+                            }
                         }
-                    )
+                    }
+                }
+            }
+        }
 
-                    CMPage.COMPLETED -> CompletedPage(exports = completedExports)
-
-                    CMPage.SETTINGS -> SettingsPage(
-                        quality = exportQuality,
-                        onQualityChange = { quality ->
-                            exportQuality = quality
-                            prefs.edit().putString("quality", quality).apply()
-                            notify("Preference saved: $quality")
-                        }
-                    )
-
-                    CMPage.EDITOR -> Unit
+        // Templates
+        item {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                SectionHeader("Trending templates", "See all", onAllTemplates)
+                LazyRow(
+                    contentPadding = PaddingValues(horizontal = 16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    items(TEMPLATES) { t ->
+                        TemplateCard(t, Modifier.width(140.dp), height = 190.dp) { onTemplate(t) }
+                    }
                 }
             }
         }
     }
 }
 
+@Composable
+private fun TemplateCard(t: Template, modifier: Modifier, height: Dp, onClick: () -> Unit) {
+    Box(
+        modifier = modifier
+            .height(height)
+            .clip(RoundedCornerShape(18.dp))
+            .background(Brush.linearGradient(t.colors))
+            .clickable(onClick = onClick)
+    ) {
+        Text(
+            t.glyph,
+            color = Color(0x55FFFFFF),
+            fontSize = 64.sp,
+            modifier = Modifier.align(Alignment.Center)
+        )
+        Text(
+            t.tag,
+            color = Color.White,
+            fontSize = 10.sp,
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .padding(10.dp)
+                .background(Color(0x66000000), RoundedCornerShape(8.dp))
+                .padding(horizontal = 8.dp, vertical = 3.dp)
+        )
+        Column(
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .fillMaxWidth()
+                .background(
+                    Brush.verticalGradient(listOf(Color.Transparent, Color(0xAA000000)))
+                )
+                .padding(12.dp)
+        ) {
+            Text(t.name, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+            Text(t.sub, color = Color(0xCCFFFFFF), fontSize = 11.sp, maxLines = 2)
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
-// Editor screen (matches the mockup)
+// Templates
+// ---------------------------------------------------------------------------
+@Composable
+private fun TemplatesPage(onUse: (Template) -> Unit, modifier: Modifier = Modifier) {
+    val categories = listOf("All", "Trending", "Cinematic", "Travel", "Photo", "Beat Sync")
+    var selected by remember { mutableStateOf("All") }
+    val shown = if (selected == "All") TEMPLATES else TEMPLATES.filter { it.tag == selected }
+
+    LazyColumn(
+        modifier = modifier,
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+        contentPadding = PaddingValues(bottom = 20.dp)
+    ) {
+        item {
+            Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
+                Text("Templates", color = CMText, fontSize = 26.sp, fontWeight = FontWeight.Bold)
+                Text(
+                    "Pick a style. Add your media and it's ready to edit.",
+                    color = CMMuted,
+                    fontSize = 13.sp
+                )
+            }
+        }
+
+        item {
+            Row(
+                modifier = Modifier
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                categories.forEach { c -> ToolChip(c, selected == c) { selected = c } }
+            }
+        }
+
+        items(shown.chunked(2)) { pair ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                pair.forEach { t ->
+                    TemplateCard(t, Modifier.weight(1f), height = 210.dp) { onUse(t) }
+                }
+                if (pair.size == 1) Spacer(Modifier.weight(1f))
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Projects (drafts + exports)
+// ---------------------------------------------------------------------------
+@Composable
+private fun ProjectsPage(
+    drafts: List<String>,
+    exports: List<CMExport>,
+    clipCountOf: (String) -> Int,
+    onOpen: (String) -> Unit,
+    onDelete: (String) -> Unit,
+    onNew: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val context = LocalContext.current
+    var tab by remember { mutableStateOf(0) }
+    var deleting by remember { mutableStateOf<String?>(null) }
+
+    Column(modifier) {
+        Text(
+            "Projects",
+            color = CMText,
+            fontSize = 26.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.padding(start = 16.dp, top = 12.dp, bottom = 8.dp)
+        )
+
+        Row(
+            modifier = Modifier
+                .padding(horizontal = 16.dp)
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(12.dp))
+                .background(CMSurface)
+                .padding(4.dp)
+        ) {
+            listOf("Drafts (${drafts.size})", "Exports (${exports.size})").forEachIndexed { i, label ->
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(9.dp))
+                        .background(if (tab == i) CMPurple else Color.Transparent)
+                        .clickable { tab = i }
+                        .padding(vertical = 9.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        label,
+                        color = if (tab == i) Color.White else CMMuted,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+            }
+        }
+
+        Spacer(Modifier.height(12.dp))
+
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 20.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            if (tab == 0) {
+                if (drafts.isEmpty()) {
+                    item {
+                        EmptyState("▤", "No drafts yet", "Save a project from the editor and it will appear here.", "Create project", onNew)
+                    }
+                } else {
+                    items(drafts.reversed(), key = { it }) { name ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(16.dp))
+                                .background(CMSurface)
+                                .clickable { onOpen(name) }
+                                .padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(60.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(
+                                        Brush.linearGradient(
+                                            listOf(Color(0xFF26346B), Color(0xFF4B34D8))
+                                        )
+                                    ),
+                                contentAlignment = Alignment.Center
+                            ) { PlayerIcon("play", Color(0xCCFFFFFF), 20.dp) }
+                            Spacer(Modifier.width(12.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(name, color = CMText, fontWeight = FontWeight.SemiBold)
+                                Text("${clipCountOf(name)} clips", color = CMMuted, fontSize = 12.sp)
+                            }
+                            TextButton(onClick = { deleting = name }) {
+                                Text("Delete", color = CMAmber, fontSize = 13.sp)
+                            }
+                        }
+                    }
+                }
+            } else {
+                if (exports.isEmpty()) {
+                    item {
+                        EmptyState("✓", "No exports yet", "Finished videos are saved to Movies/CineMotion and listed here.", "Start editing", onNew)
+                    }
+                } else {
+                    items(exports, key = { it.uri }) { ex ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(16.dp))
+                                .background(CMSurface)
+                                .padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(48.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(Color(0xFF14323A)),
+                                contentAlignment = Alignment.Center
+                            ) { Text("✓", color = CMTeal, fontSize = 20.sp) }
+                            Spacer(Modifier.width(12.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(ex.title, color = CMText, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                                Text("Movies/CineMotion", color = CMMuted, fontSize = 12.sp)
+                            }
+                            TextButton(onClick = {
+                                try {
+                                    context.startActivity(
+                                        Intent(Intent.ACTION_VIEW)
+                                            .setDataAndType(Uri.parse(ex.uri), "video/*")
+                                            .addFlags(
+                                                Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                                                    Intent.FLAG_ACTIVITY_NEW_TASK
+                                            )
+                                    )
+                                } catch (_: Exception) {
+                                    Toast.makeText(context, "No app can play this video", Toast.LENGTH_SHORT).show()
+                                }
+                            }) { Text("Play", color = CMTeal, fontSize = 13.sp) }
+                            TextButton(onClick = {
+                                try {
+                                    val send = Intent(Intent.ACTION_SEND)
+                                        .setType("video/*")
+                                        .putExtra(Intent.EXTRA_STREAM, Uri.parse(ex.uri))
+                                        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                    context.startActivity(
+                                        Intent.createChooser(send, "Share video")
+                                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                    )
+                                } catch (_: Exception) {
+                                    Toast.makeText(context, "Couldn't share this video", Toast.LENGTH_SHORT).show()
+                                }
+                            }) { Text("Share", color = CMIce, fontSize = 13.sp) }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    deleting?.let { name ->
+        AlertDialog(
+            onDismissRequest = { deleting = null },
+            containerColor = CMSurface,
+            title = { Text("Delete $name?", color = CMText) },
+            text = { Text("This draft will be removed from this device.", color = CMMuted) },
+            confirmButton = {
+                TextButton(onClick = {
+                    onDelete(name)
+                    deleting = null
+                }) { Text("Delete", color = CMAmber) }
+            },
+            dismissButton = {
+                TextButton(onClick = { deleting = null }) { Text("Cancel", color = CMMuted) }
+            }
+        )
+    }
+}
+
+@Composable
+private fun EmptyState(glyph: String, title: String, body: String, action: String, onAction: () -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 40.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Box(
+            modifier = Modifier
+                .size(72.dp)
+                .clip(CircleShape)
+                .background(CMSurface),
+            contentAlignment = Alignment.Center
+        ) { Text(glyph, color = CMTeal, fontSize = 30.sp) }
+        Spacer(Modifier.height(14.dp))
+        Text(title, color = CMText, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(4.dp))
+        Text(body, color = CMMuted, fontSize = 13.sp, modifier = Modifier.padding(horizontal = 24.dp))
+        Spacer(Modifier.height(16.dp))
+        Box(
+            modifier = Modifier
+                .clip(RoundedCornerShape(14.dp))
+                .background(CMBrand)
+                .clickable(onClick = onAction)
+                .padding(horizontal = 22.dp, vertical = 11.dp)
+        ) { Text(action, color = Color.White, fontWeight = FontWeight.SemiBold) }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
+@Composable
+private fun SettingsSectionTitle(text: String) {
+    Text(
+        text,
+        color = CMMuted,
+        fontSize = 11.sp,
+        letterSpacing = 1.5.sp,
+        modifier = Modifier.padding(start = 20.dp, top = 6.dp)
+    )
+}
+
+@Composable
+private fun SettingsCard(content: @Composable ColumnScope.() -> Unit) {
+    Column(
+        modifier = Modifier
+            .padding(horizontal = 16.dp)
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(18.dp))
+            .background(CMSurface),
+        content = content
+    )
+}
+
+@Composable
+private fun RowDivider() {
+    Box(
+        Modifier
+            .padding(start = 16.dp)
+            .fillMaxWidth()
+            .height(1.dp)
+            .background(Color(0x14FFFFFF))
+    )
+}
+
+@Composable
+private fun SettingsRow(
+    title: String,
+    subtitle: String? = null,
+    value: String? = null,
+    onClick: (() -> Unit)? = null,
+    trailing: (@Composable () -> Unit)? = null
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+            .padding(horizontal = 16.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(title, color = CMText, fontSize = 15.sp)
+            if (subtitle != null) Text(subtitle, color = CMMuted, fontSize = 12.sp)
+        }
+        if (value != null) Text(value, color = CMTeal, fontSize = 14.sp)
+        if (trailing != null) trailing()
+        if (onClick != null && trailing == null) Text("  ›", color = CMMuted, fontSize = 20.sp)
+    }
+}
+
+@Composable
+private fun SettingsSliderRow(
+    title: String,
+    value: String,
+    sliderValue: Float,
+    range: ClosedFloatingPointRange<Float>,
+    steps: Int,
+    onChange: (Float) -> Unit,
+    onFinished: () -> Unit
+) {
+    Column(Modifier.padding(horizontal = 16.dp, vertical = 10.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(title, color = CMText, fontSize = 15.sp, modifier = Modifier.weight(1f))
+            Text(value, color = CMTeal, fontSize = 14.sp)
+        }
+        Slider(
+            value = sliderValue,
+            onValueChange = onChange,
+            onValueChangeFinished = onFinished,
+            valueRange = range,
+            steps = steps,
+            colors = SliderDefaults.colors(
+                thumbColor = CMTeal,
+                activeTrackColor = CMTeal,
+                inactiveTrackColor = CMSurface2
+            )
+        )
+    }
+}
+
+@Composable
+private fun <T> ChoiceDialog(
+    title: String,
+    options: List<T>,
+    selected: T,
+    label: (T) -> String,
+    onSelect: (T) -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = CMSurface,
+        title = { Text(title, color = CMText) },
+        text = {
+            Column {
+                options.forEach { o ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                onSelect(o)
+                                onDismiss()
+                            }
+                            .padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        RadioButton(
+                            selected = o == selected,
+                            onClick = {
+                                onSelect(o)
+                                onDismiss()
+                            },
+                            colors = RadioButtonDefaults.colors(selectedColor = CMTeal)
+                        )
+                        Text(label(o), color = CMText)
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel", color = CMMuted) }
+        }
+    )
+}
+
+@Composable
+private fun SettingsPage(
+    settings: AppSettings,
+    draftCount: Int,
+    exportCount: Int,
+    onClearDrafts: () -> Unit,
+    onClearExports: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var dialog by remember { mutableStateOf<String?>(null) }
+
+    LazyColumn(
+        modifier = modifier,
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+        contentPadding = PaddingValues(bottom = 24.dp)
+    ) {
+        item {
+            Text(
+                "Settings",
+                color = CMText,
+                fontSize = 26.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(start = 16.dp, top = 12.dp)
+            )
+        }
+
+        item {
+            Row(
+                modifier = Modifier
+                    .padding(horizontal = 16.dp)
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(18.dp))
+                    .background(CMSurface)
+                    .padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                BrandMark(46.dp)
+                Spacer(Modifier.width(14.dp))
+                Column {
+                    BrandTitle(18)
+                    Text("Video editor · Version 1.0", color = CMMuted, fontSize = 12.sp)
+                }
+            }
+        }
+
+        item { SettingsSectionTitle("EXPORT") }
+        item {
+            SettingsCard {
+                SettingsRow("Resolution", "Size of the exported video", settings.quality, { dialog = "quality" })
+                RowDivider()
+                SettingsRow("Frame rate", "Smoothness of motion", "${settings.fps} fps", { dialog = "fps" })
+                RowDivider()
+                SettingsRow("Save location", "Where finished videos go", "Movies/CineMotion")
+            }
+        }
+
+        item { SettingsSectionTitle("EDITING") }
+        item {
+            SettingsCard {
+                SettingsSliderRow(
+                    title = "Default photo duration",
+                    value = "${settings.photoSec} s",
+                    sliderValue = settings.photoSec.toFloat(),
+                    range = 1f..10f,
+                    steps = 8,
+                    onChange = { settings.photoSec = it.roundToInt() },
+                    onFinished = { settings.save() }
+                )
+                RowDivider()
+                SettingsSliderRow(
+                    title = "Transition length",
+                    value = "%.1f s".format(settings.transitionMs / 1000f),
+                    sliderValue = settings.transitionMs.toFloat(),
+                    range = 200f..1500f,
+                    steps = 12,
+                    onChange = { settings.transitionMs = (it / 100f).roundToInt() * 100 },
+                    onFinished = { settings.save() }
+                )
+                RowDivider()
+                SettingsRow(
+                    title = "Auto-detect beats",
+                    subtitle = "Analyze the tempo when you add music",
+                    trailing = {
+                        Switch(
+                            checked = settings.autoBeat,
+                            onCheckedChange = {
+                                settings.autoBeat = it
+                                settings.save()
+                            },
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = Color.White,
+                                checkedTrackColor = CMPurple
+                            )
+                        )
+                    }
+                )
+            }
+        }
+
+        item { SettingsSectionTitle("STORAGE") }
+        item {
+            SettingsCard {
+                SettingsRow("Clear drafts", "$draftCount saved", null, { dialog = "clear_drafts" })
+                RowDivider()
+                SettingsRow("Clear export history", "$exportCount listed (videos stay in your gallery)", null, { dialog = "clear_exports" })
+            }
+        }
+
+        item { SettingsSectionTitle("ABOUT") }
+        item {
+            SettingsCard {
+                SettingsRow("How it works", "Quick editing guide", null, { dialog = "help" })
+                RowDivider()
+                SettingsRow("Privacy", "Your media stays on this device", null, { dialog = "privacy" })
+                RowDivider()
+                SettingsRow("Version", null, "1.0")
+            }
+        }
+    }
+
+    when (dialog) {
+        "quality" -> ChoiceDialog(
+            "Resolution", listOf("720p", "1080p", "4K"), settings.quality, { it },
+            { settings.quality = it; settings.save() }, { dialog = null }
+        )
+        "fps" -> ChoiceDialog(
+            "Frame rate", listOf(24, 30, 60), settings.fps, { "$it fps" },
+            { settings.fps = it; settings.save() }, { dialog = null }
+        )
+        "clear_drafts" -> ConfirmDialog(
+            "Clear all drafts?", "This removes every saved draft from this device.",
+            { onClearDrafts(); dialog = null }, { dialog = null }
+        )
+        "clear_exports" -> ConfirmDialog(
+            "Clear export history?", "Only the list is cleared. Your videos stay in Movies/CineMotion.",
+            { onClearExports(); dialog = null }, { dialog = null }
+        )
+        "help" -> InfoDialog(
+            "How it works",
+            "1. Tap + to add photos and videos.\n" +
+                "2. Drag the timeline to scrub, tap a clip to select it.\n" +
+                "3. Use the tools: trim, split, speed, transitions, effects, stickers and text.\n" +
+                "4. Add music, then open Beat and tap Detect beats. Sync snaps your cuts to the rhythm.\n" +
+                "5. Tap Export to render the video."
+        ) { dialog = null }
+        "privacy" -> InfoDialog(
+            "Privacy",
+            "CineMotion edits your photos, videos and music on this device. Nothing is uploaded."
+        ) { dialog = null }
+    }
+}
+
+@Composable
+private fun ConfirmDialog(title: String, body: String, onConfirm: () -> Unit, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = CMSurface,
+        title = { Text(title, color = CMText) },
+        text = { Text(body, color = CMMuted) },
+        confirmButton = { TextButton(onClick = onConfirm) { Text("Confirm", color = CMAmber) } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel", color = CMMuted) } }
+    )
+}
+
+@Composable
+private fun InfoDialog(title: String, body: String, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = CMSurface,
+        title = { Text(title, color = CMText) },
+        text = { Text(body, color = CMMuted, fontSize = 14.sp) },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Got it", color = CMTeal) } }
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Editor screen
 // ---------------------------------------------------------------------------
 @Composable
 private fun EditorScreen(
@@ -823,6 +2035,7 @@ private fun EditorScreen(
     onAddAudio: () -> Unit,
     onSaveDraft: () -> Unit,
     onExport: () -> Unit,
+    onDetectBeats: () -> Unit,
     notify: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -903,14 +2116,10 @@ private fun EditorScreen(
                     .weight(1f)
                     .verticalScroll(rememberScrollState())
             ) {
-                PreviewArea(
-                    ed,
-                    onAddMedia,
-                    Modifier.fillMaxWidth().aspectRatio(16f / 9f)
-                )
+                PreviewArea(ed, onAddMedia, Modifier.fillMaxWidth().aspectRatio(16f / 9f))
                 PlayerControls(ed, notify)
                 TimelineArea(ed, onAddMedia, onAddAudio)
-                ToolsPanel(ed, notify)
+                ToolsPanel(ed, notify, onDetectBeats)
 
                 Row(
                     modifier = Modifier
@@ -934,28 +2143,15 @@ private fun EditorScreen(
     }
 
     if (showHelp) {
-        AlertDialog(
-            onDismissRequest = { showHelp = false },
-            containerColor = CMSurface,
-            title = { Text("Quick guide", color = CMText) },
-            text = {
-                Text(
-                    "• Drag the timeline left or right to scrub.\n" +
-                        "• Tap a clip, then choose a tool below.\n" +
-                        "• Split cuts the selected clip at the playhead.\n" +
-                        "• Tap the ⋈ marker between clips to pick a transition.\n" +
-                        "• Stickers, Text and Effects are added at the playhead.\n" +
-                        "• Select any item and press Delete to remove it.",
-                    color = CMMuted,
-                    fontSize = 14.sp
-                )
-            },
-            confirmButton = {
-                TextButton(onClick = { showHelp = false }) {
-                    Text("Got it", color = CMTeal)
-                }
-            }
-        )
+        InfoDialog(
+            "Quick guide",
+            "• Drag the timeline left or right to scrub.\n" +
+                "• Tap a clip, then choose a tool below.\n" +
+                "• Tap the ⋈ marker at the end of a clip to pick its transition.\n" +
+                "• Beat: detect the music's tempo, then sync your cuts to it.\n" +
+                "• Stickers, Text and Effects are added at the playhead.\n" +
+                "• Select any item and press Delete to remove it."
+        ) { showHelp = false }
     }
 }
 
@@ -983,27 +2179,9 @@ private fun EditorTopBar(
         )
 
         Spacer(Modifier.width(6.dp))
-
-        Box(
-            modifier = Modifier
-                .size(34.dp)
-                .clip(RoundedCornerShape(10.dp))
-                .background(Brush.linearGradient(listOf(CMTeal, CMBlue, CMPurple))),
-            contentAlignment = Alignment.Center
-        ) {
-            PlayerIcon("play", Color.White, 16.dp)
-        }
-
+        BrandMark(34.dp)
         Spacer(Modifier.width(8.dp))
-
-        Text(
-            text = buildAnnotatedString {
-                withStyle(SpanStyle(color = CMText)) { append("Cine") }
-                withStyle(SpanStyle(color = CMTeal)) { append("Motion") }
-            },
-            fontSize = 20.sp,
-            fontWeight = FontWeight.Bold
-        )
+        BrandTitle(20)
 
         Spacer(Modifier.weight(1f))
 
@@ -1024,9 +2202,7 @@ private fun EditorTopBar(
             modifier = Modifier
                 .alpha(if (isExporting) 0.6f else 1f)
                 .clip(RoundedCornerShape(14.dp))
-                .background(
-                    Brush.horizontalGradient(listOf(Color(0xFF5B4DFF), Color(0xFF3C86FF)))
-                )
+                .background(CMBrand)
                 .clickable(enabled = !isExporting, onClick = onExport)
                 .padding(horizontal = 16.dp, vertical = 10.dp),
             contentAlignment = Alignment.Center
@@ -1041,6 +2217,98 @@ private fun EditorTopBar(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Preview (with live transitions)
+// ---------------------------------------------------------------------------
+@Composable
+private fun FrameImage(bmp: ImageBitmap, modifier: Modifier, filter: ColorFilter?) {
+    Image(
+        bitmap = bmp,
+        contentDescription = null,
+        modifier = modifier.fillMaxSize(),
+        contentScale = ContentScale.Crop,
+        colorFilter = filter
+    )
+}
+
+@Composable
+private fun TransitionFrame(
+    out: ImageBitmap,
+    inc: ImageBitmap,
+    name: String,
+    p: Float,
+    filter: ColorFilter?
+) {
+    val e = p * p * (3f - 2f * p)
+    Box(Modifier.fillMaxSize().background(Color.Black)) {
+        when (name) {
+            "Slide" -> {
+                FrameImage(inc, Modifier.graphicsLayer { translationX = size.width * (1f - e) }, filter)
+                FrameImage(out, Modifier.graphicsLayer { translationX = -size.width * e }, filter)
+            }
+            "Zoom" -> {
+                FrameImage(
+                    inc,
+                    Modifier.graphicsLayer {
+                        scaleX = 0.85f + 0.15f * e
+                        scaleY = 0.85f + 0.15f * e
+                    },
+                    filter
+                )
+                FrameImage(
+                    out,
+                    Modifier.graphicsLayer {
+                        scaleX = 1f + 0.9f * e
+                        scaleY = 1f + 0.9f * e
+                        alpha = 1f - e
+                    },
+                    filter
+                )
+            }
+            "Fade" -> {
+                if (p < 0.5f) FrameImage(out, Modifier.graphicsLayer { alpha = 1f - 2f * p }, filter)
+                else FrameImage(inc, Modifier.graphicsLayer { alpha = 2f * p - 1f }, filter)
+            }
+            "Dissolve" -> {
+                FrameImage(inc, Modifier, filter)
+                FrameImage(
+                    out,
+                    Modifier.graphicsLayer {
+                        alpha = 1f - e
+                        scaleX = 1f + 0.06f * e
+                        scaleY = 1f + 0.06f * e
+                    },
+                    filter
+                )
+            }
+            "Whip Pan" -> {
+                val outX = p * p * p
+                val inX = 1f - (1f - p) * (1f - p) * (1f - p)
+                FrameImage(
+                    inc,
+                    Modifier.graphicsLayer {
+                        translationX = size.width * (1f - inX)
+                        alpha = 0.6f + 0.4f * inX
+                    },
+                    filter
+                )
+                FrameImage(
+                    out,
+                    Modifier.graphicsLayer {
+                        translationX = -size.width * outX
+                        alpha = 1f - 0.4f * outX
+                    },
+                    filter
+                )
+            }
+            else -> { // Crossfade
+                FrameImage(inc, Modifier, filter)
+                FrameImage(out, Modifier.graphicsLayer { alpha = 1f - p }, filter)
+            }
+        }
+    }
+}
+
 @Composable
 private fun PreviewArea(
     ed: EditorState,
@@ -1051,6 +2319,7 @@ private fun PreviewArea(
 
     val loc = ed.locate(ed.positionMs)
     val cur = loc?.let { ed.clips.getOrNull(it.first) }
+    val next = loc?.let { ed.clips.getOrNull(it.first + 1) }
     val srcMs = if (cur != null && loc != null) {
         cur.startMs + (loc.second * cur.speed).toLong()
     } else 0L
@@ -1069,25 +2338,31 @@ private fun PreviewArea(
         cur.clip.isImage -> cur.thumb
         else -> frame ?: cur.thumb
     }
+    val outImg = remember(bmp) { bmp?.asImageBitmap() }
+    val nextBmp = next?.thumb
+    val inImg = remember(nextBmp) { nextBmp?.asImageBitmap() }
+
+    // Transition progress (0..1) during the last part of a clip, or -1 when none
+    val tMs = minOf(ed.transitionMs, (cur?.lengthMs ?: 0L) / 2)
+    val remaining = (cur?.lengthMs ?: 0L) - (loc?.second ?: 0L)
+    val p = if (
+        cur != null && next != null && cur.transition != "None" &&
+        tMs > 0L && remaining < tMs
+    ) 1f - remaining / tMs.toFloat() else -1f
 
     val active = ed.overlays.filter {
         ed.positionMs >= it.startMs && ed.positionMs < it.startMs + it.lengthMs
     }
-    val filter = effectFilter(active.firstOrNull { it.kind == KIND_EFFECT }?.label)
+    val filter = effectFilter(active.firstOrNull { it.kind == KIND_EFFECT }?.label ?: ed.globalEffect)
 
     Box(
         modifier = modifier.background(Color.Black),
         contentAlignment = Alignment.Center
     ) {
-        if (bmp != null) {
-            val img = remember(bmp) { bmp.asImageBitmap() }
-            Image(
-                bitmap = img,
-                contentDescription = null,
-                modifier = Modifier.fillMaxSize(),
-                contentScale = ContentScale.Crop,
-                colorFilter = filter
-            )
+        if (outImg != null && inImg != null && cur != null && p >= 0f) {
+            TransitionFrame(outImg, inImg, cur.transition, p.coerceIn(0f, 1f), filter)
+        } else if (outImg != null) {
+            FrameImage(outImg, Modifier, filter)
         } else if (ed.clips.isEmpty()) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text("Your project preview", color = CMText, fontWeight = FontWeight.SemiBold)
@@ -1252,6 +2527,20 @@ private fun PlayerIcon(kind: String, color: Color = Color.White, iconSize: Dp = 
 // ---------------------------------------------------------------------------
 // Timeline
 // ---------------------------------------------------------------------------
+private fun DrawScope.drawBeats(beats: List<Long>, color: Color) {
+    val perMs = DP_PER_SEC.toPx() / 1000f
+    beats.forEachIndexed { i, ms ->
+        val x = ms * perMs
+        if (x <= size.width) {
+            drawCircle(
+                color,
+                radius = if (i % 4 == 0) 3.dp.toPx() else 2.dp.toPx(),
+                center = Offset(x, size.height - 6.dp.toPx())
+            )
+        }
+    }
+}
+
 @Composable
 private fun TimelineArea(
     ed: EditorState,
@@ -1271,7 +2560,6 @@ private fun TimelineArea(
             .fillMaxWidth()
             .height(232.dp)
     ) {
-        // Track icons
         Column(modifier = Modifier.width(48.dp)) {
             Spacer(Modifier.height(28.dp))
             TrackIcon("▣", 60.dp) { onAddMedia() }
@@ -1328,7 +2616,6 @@ private fun TimelineArea(
                 }
             }
 
-            // Playhead
             Box(
                 modifier = Modifier
                     .align(Alignment.TopCenter)
@@ -1428,6 +2715,24 @@ private fun VideoLane(ed: EditorState, onAddMedia: () -> Unit) {
 
                 if (index < ed.clips.lastIndex) {
                     val has = c.transition != "None"
+
+                    // Transition zone at the end of the clip
+                    if (has) {
+                        val zone = DP_PER_SEC *
+                            (minOf(ed.transitionMs, c.lengthMs / 2) / 1000f)
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.CenterEnd)
+                                .width(zone)
+                                .fillMaxHeight()
+                                .background(
+                                    Brush.horizontalGradient(
+                                        listOf(Color.Transparent, CMPurple.copy(alpha = 0.85f))
+                                    )
+                                )
+                        )
+                    }
+
                     val ms = RoundedCornerShape(7.dp)
                     Box(
                         modifier = Modifier
@@ -1478,6 +2783,7 @@ private fun MusicLane(ed: EditorState, onAddAudio: () -> Unit) {
             .background(Color(0x14FFFFFF))
     ) {
         if (uri == null) {
+            Canvas(Modifier.fillMaxSize()) { drawBeats(ed.beats, CMTeal) }
             Text(
                 "Tap ♫ to add music",
                 color = CMMuted,
@@ -1519,6 +2825,7 @@ private fun MusicLane(ed: EditorState, onAddAudio: () -> Unit) {
                         x += step
                         i++
                     }
+                    drawBeats(ed.beats, Color(0xFFFFE08A))
                 }
                 Text(
                     "♫  $name",
@@ -1546,6 +2853,31 @@ private fun OverlayLane(ed: EditorState, kind: Int, color: Color, prefix: String
             .clip(shape)
             .background(Color(0x14FFFFFF))
     ) {
+        if (kind == KIND_EFFECT && ed.globalEffect != null) {
+            val selected = ed.selKind == SEL_OVERLAY && ed.selId == GLOBAL_EFFECT_ID
+            Box(
+                modifier = Modifier
+                    .width(DP_PER_SEC * (ed.totalMs / 1000f).coerceAtLeast(2f))
+                    .fillMaxHeight()
+                    .clip(shape)
+                    .background(color.copy(alpha = 0.55f))
+                    .then(if (selected) Modifier.border(2.dp, CMTeal, shape) else Modifier)
+                    .clickable {
+                        ed.selKind = SEL_OVERLAY
+                        ed.selId = GLOBAL_EFFECT_ID
+                    },
+                contentAlignment = Alignment.CenterStart
+            ) {
+                Text(
+                    "✦  ${ed.globalEffect} (whole video)",
+                    color = Color.White,
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    modifier = Modifier.padding(horizontal = 8.dp)
+                )
+            }
+        }
+
         ed.overlays.filter { it.kind == kind }.forEach { o ->
             val selected = ed.selKind == SEL_OVERLAY && ed.selId == o.uid
             Box(
@@ -1579,12 +2911,13 @@ private fun OverlayLane(ed: EditorState, kind: Int, color: Color, prefix: String
 // Tools
 // ---------------------------------------------------------------------------
 @Composable
-private fun ToolsPanel(ed: EditorState, notify: (String) -> Unit) {
+private fun ToolsPanel(ed: EditorState, notify: (String) -> Unit, onDetectBeats: () -> Unit) {
     val tools = listOf(
         "Trim" to "✂",
         "Split" to "◧",
         "Speed" to "◔",
         "Transition" to "⋈",
+        "Beat" to "♪",
         "Effects" to "✦",
         "Stickers" to "☺",
         "Text" to "T"
@@ -1624,12 +2957,16 @@ private fun ToolsPanel(ed: EditorState, notify: (String) -> Unit) {
             }
         }
 
-        Row(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
+        ) {
             tools.forEach { (name, glyph) ->
                 val sel = ed.tool == name
                 Column(
                     modifier = Modifier
-                        .weight(1f)
+                        .width(66.dp)
                         .clickable {
                             if (name == "Split") notify(ed.split()) else ed.tool = name
                         }
@@ -1661,6 +2998,7 @@ private fun ToolsPanel(ed: EditorState, notify: (String) -> Unit) {
                 "Trim" -> TrimPanel(ed)
                 "Speed" -> SpeedPanel(ed, notify)
                 "Transition" -> TransitionPanel(ed, notify)
+                "Beat" -> BeatPanel(ed, notify, onDetectBeats)
                 "Effects" -> EffectsPanel(ed, notify)
                 "Stickers" -> StickersPanel(ed)
                 "Text" -> TextPanel(ed, notify)
@@ -1790,6 +3128,13 @@ private fun TransitionPanel(ed: EditorState, notify: (String) -> Unit) {
         "Whip Pan" to "⇒"
     )
 
+    Text(
+        "Applies to the end of the selected clip",
+        color = CMMuted,
+        fontSize = 11.sp,
+        modifier = Modifier.padding(bottom = 8.dp)
+    )
+
     Row(
         modifier = Modifier.horizontalScroll(rememberScrollState()),
         horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -1802,6 +3147,8 @@ private fun TransitionPanel(ed: EditorState, notify: (String) -> Unit) {
                 modifier = Modifier.clickable {
                     if (c == null) {
                         notify("Add media first")
+                    } else if (ed.clips.lastOrNull()?.uid == c.uid) {
+                        notify("Transitions go between clips. Select a clip that has one after it.")
                     } else {
                         c.transition = name
                         notify(if (name == "None") "Transition removed" else "$name applied")
@@ -1812,9 +3159,7 @@ private fun TransitionPanel(ed: EditorState, notify: (String) -> Unit) {
                     modifier = Modifier
                         .size(width = 66.dp, height = 54.dp)
                         .clip(shape)
-                        .background(
-                            Brush.linearGradient(listOf(Color(0xFF2B3A6B), CMPurple))
-                        )
+                        .background(Brush.linearGradient(listOf(Color(0xFF2B3A6B), CMPurple)))
                         .then(if (selected) Modifier.border(2.dp, CMTeal, shape) else Modifier),
                     contentAlignment = Alignment.Center
                 ) {
@@ -1828,6 +3173,48 @@ private fun TransitionPanel(ed: EditorState, notify: (String) -> Unit) {
                     maxLines = 1
                 )
             }
+        }
+    }
+}
+
+@Composable
+private fun BeatPanel(ed: EditorState, notify: (String) -> Unit, onDetect: () -> Unit) {
+    val status = when {
+        ed.beatStatus.isNotBlank() -> ed.beatStatus
+        ed.beats.isEmpty() -> "No beats yet. Add music, then tap Detect beats."
+        ed.beatBpm > 0f -> "${ed.beatBpm.roundToInt()} BPM · ${ed.beats.size} beats"
+        else -> "${ed.beats.size} beat markers"
+    }
+
+    Text(status, color = CMTeal, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+    Spacer(Modifier.height(8.dp))
+
+    Row(
+        modifier = Modifier.horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        ToolChip("Detect beats", false) { onDetect() }
+        ToolChip("+ Marker", false) {
+            ed.addBeat(ed.positionMs)
+            notify("Beat marker added")
+        }
+        ToolChip("Clear", false) {
+            ed.beats.clear()
+            ed.beatBpm = 0f
+            ed.beatStatus = ""
+        }
+    }
+
+    Spacer(Modifier.height(12.dp))
+    Text("Sync cuts to the beat", color = CMMuted, fontSize = 12.sp)
+    Spacer(Modifier.height(6.dp))
+
+    Row(
+        modifier = Modifier.horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        listOf(1 to "Every beat", 2 to "Every 2 beats", 4 to "Every 4 beats").forEach { (n, label) ->
+            ToolChip(label, false) { notify(ed.syncToBeats(n)) }
         }
     }
 }
@@ -1854,9 +3241,7 @@ private fun EffectsPanel(ed: EditorState, notify: (String) -> Unit) {
                         it.kind == KIND_EFFECT && p >= it.startMs && p < it.startMs + it.lengthMs
                     }
                     if (name != "None") {
-                        ed.overlays.add(
-                            Overlay(ed.newId(), KIND_EFFECT, name, p, 5_000L)
-                        )
+                        ed.overlays.add(Overlay(ed.newId(), KIND_EFFECT, name, p, 5_000L))
                     }
                     notify(if (name == "None") "Effect removed" else "$name added at playhead")
                 }
@@ -1903,7 +3288,7 @@ private fun TextPanel(ed: EditorState, notify: (String) -> Unit) {
             textStyle = TextStyle(color = CMText, fontSize = 15.sp),
             cursorBrush = SolidColor(CMTeal),
             modifier = Modifier.weight(1f),
-            decorationBox = { innerTextField ->
+            decorationBox = { inner ->
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -1911,10 +3296,8 @@ private fun TextPanel(ed: EditorState, notify: (String) -> Unit) {
                         .border(1.dp, Color(0x33FFFFFF), RoundedCornerShape(12.dp))
                         .padding(horizontal = 14.dp, vertical = 12.dp)
                 ) {
-                    if (value.isEmpty()) {
-                        Text("Type your text", color = CMMuted, fontSize = 15.sp)
-                    }
-                    innerTextField()
+                    if (value.isEmpty()) Text("Type your text", color = CMMuted, fontSize = 15.sp)
+                    inner()
                 }
             }
         )
@@ -1939,365 +3322,5 @@ private fun TextPanel(ed: EditorState, notify: (String) -> Unit) {
                 contentColor = CMBackground
             )
         ) { Text("Add") }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Other pages
-// ---------------------------------------------------------------------------
-@Composable
-private fun HomePage(
-    clipCount: Int,
-    onCreate: () -> Unit,
-    onOpenEditor: () -> Unit,
-    onTemplates: () -> Unit,
-    onSettings: () -> Unit
-) {
-    LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
-    ) {
-        item {
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(24.dp),
-                color = CMSurface
-            ) {
-                Column(modifier = Modifier.padding(22.dp)) {
-                    Text(
-                        "YOUR NEXT STORY STARTS HERE",
-                        color = CMTeal,
-                        fontSize = 11.sp,
-                        letterSpacing = 1.5.sp
-                    )
-                    Spacer(modifier = Modifier.height(12.dp))
-                    Text(
-                        "Make every frame matter.",
-                        color = CMText,
-                        fontSize = 28.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        "Bring photos, videos and music together.",
-                        color = CMMuted,
-                        fontSize = 14.sp
-                    )
-                    Spacer(modifier = Modifier.height(22.dp))
-
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(14.dp))
-                            .background(
-                                Brush.horizontalGradient(
-                                    listOf(Color(0xFF5B4DFF), Color(0xFF3C86FF))
-                                )
-                            )
-                            .clickable(onClick = onCreate)
-                            .padding(14.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            "+  Create a project",
-                            color = Color.White,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                }
-            }
-        }
-
-        item {
-            Text("WORKSPACE", color = CMMuted, fontSize = 11.sp, letterSpacing = 2.sp)
-        }
-
-        item {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                StatCard(
-                    title = "Timeline",
-                    value = "$clipCount items",
-                    modifier = Modifier.weight(1f),
-                    accent = CMTeal,
-                    onClick = onOpenEditor
-                )
-                StatCard(
-                    title = "Templates",
-                    value = "Explore",
-                    modifier = Modifier.weight(1f),
-                    accent = CMIce,
-                    onClick = onTemplates
-                )
-            }
-        }
-
-        item {
-            ActionRow(
-                title = "Continue editing",
-                subtitle = "Open your current timeline",
-                onClick = onOpenEditor
-            )
-        }
-
-        item {
-            ActionRow(
-                title = "Preferences",
-                subtitle = "Adjust your export quality preference",
-                onClick = onSettings
-            )
-        }
-    }
-}
-
-@Composable
-private fun StatCard(
-    title: String,
-    value: String,
-    modifier: Modifier = Modifier,
-    accent: Color,
-    onClick: () -> Unit
-) {
-    Surface(
-        modifier = modifier.clickable(onClick = onClick),
-        color = CMSurface,
-        shape = RoundedCornerShape(18.dp)
-    ) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            Text(title, color = CMMuted, fontSize = 12.sp)
-            Spacer(modifier = Modifier.height(8.dp))
-            Text(value, color = accent, fontSize = 19.sp, fontWeight = FontWeight.Bold)
-        }
-    }
-}
-
-@Composable
-private fun ActionRow(
-    title: String,
-    subtitle: String,
-    onClick: () -> Unit
-) {
-    Surface(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick),
-        color = CMSurface,
-        shape = RoundedCornerShape(16.dp)
-    ) {
-        Row(
-            modifier = Modifier.padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(title, color = CMText, fontWeight = FontWeight.SemiBold)
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(subtitle, color = CMMuted, fontSize = 12.sp)
-            }
-            Text("›", color = CMTeal, fontSize = 28.sp)
-        }
-    }
-}
-
-@Composable
-private fun TemplatesPage(
-    onUseTemplate: (String) -> Unit
-) {
-    val templates = listOf(
-        "Cinematic Story" to "Vintage look with a title card",
-        "Photo Montage" to "Warm tone for a sequence of stills",
-        "Travel Reel" to "Vivid colours for your journey clips",
-        "Music Video" to "Combine clips with a soundtrack"
-    )
-
-    LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        item {
-            Text("Templates", color = CMText, fontSize = 26.sp, fontWeight = FontWeight.Bold)
-            Text(
-                "Choose a starting point for your project.",
-                color = CMMuted,
-                fontSize = 13.sp
-            )
-        }
-
-        items(templates) { template ->
-            ActionRow(
-                title = template.first,
-                subtitle = template.second,
-                onClick = { onUseTemplate(template.first) }
-            )
-        }
-    }
-}
-
-@Composable
-private fun DraftsPage(
-    drafts: List<String>,
-    onOpen: (String) -> Unit,
-    onDelete: (String) -> Unit
-) {
-    LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        item {
-            Text("Drafts", color = CMText, fontSize = 26.sp, fontWeight = FontWeight.Bold)
-        }
-
-        if (drafts.isEmpty()) {
-            item { Text("No drafts saved yet.", color = CMMuted) }
-        } else {
-            items(drafts, key = { it }) { draft ->
-                Surface(
-                    color = CMSurface,
-                    shape = RoundedCornerShape(15.dp),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(modifier = Modifier.padding(14.dp)) {
-                        Text(draft, color = CMText, fontWeight = FontWeight.SemiBold)
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Row {
-                            TextButton(onClick = { onOpen(draft) }) {
-                                Text("Open", color = CMTeal)
-                            }
-                            TextButton(onClick = { onDelete(draft) }) {
-                                Text("Delete", color = CMAmber)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun CompletedPage(
-    exports: List<CMExport>
-) {
-    LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        item {
-            Text(
-                "Completed exports",
-                color = CMText,
-                fontSize = 25.sp,
-                fontWeight = FontWeight.Bold
-            )
-            Text(
-                "Finished videos are saved in Movies/CineMotion.",
-                color = CMMuted,
-                fontSize = 13.sp
-            )
-        }
-
-        if (exports.isEmpty()) {
-            item {
-                Surface(
-                    modifier = Modifier.fillMaxWidth(),
-                    color = CMSurface,
-                    shape = RoundedCornerShape(16.dp)
-                ) {
-                    Column(modifier = Modifier.padding(18.dp)) {
-                        Text(
-                            "No exports listed here yet",
-                            color = CMText,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Text(
-                            "Check your Movies/CineMotion folder for exported files.",
-                            color = CMMuted,
-                            fontSize = 12.sp
-                        )
-                    }
-                }
-            }
-        } else {
-            items(exports, key = { it.uri }) { export ->
-                ActionRow(title = export.title, subtitle = export.uri, onClick = {})
-            }
-        }
-    }
-}
-
-@Composable
-private fun SettingsPage(
-    quality: String,
-    onQualityChange: (String) -> Unit
-) {
-    LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
-    ) {
-        item {
-            Text("Settings", color = CMText, fontSize = 26.sp, fontWeight = FontWeight.Bold)
-            Text(
-                "Configure your editing preferences.",
-                color = CMMuted,
-                fontSize = 13.sp
-            )
-        }
-
-        item {
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                color = CMSurface,
-                shape = RoundedCornerShape(16.dp)
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text(
-                        "Preferred export quality",
-                        color = CMText,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                    Spacer(modifier = Modifier.height(12.dp))
-
-                    listOf("720p", "1080p", "4K").forEach { option ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { onQualityChange(option) }
-                                .padding(vertical = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            RadioButton(
-                                selected = quality == option,
-                                onClick = { onQualityChange(option) },
-                                colors = RadioButtonDefaults.colors(selectedColor = CMTeal)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(option, color = CMText)
-                        }
-                    }
-
-                    Text(
-                        "The preference is saved, but the current export implementation does not apply this resolution setting yet.",
-                        color = CMMuted,
-                        fontSize = 11.sp
-                    )
-                }
-            }
-        }
-
-        item {
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                color = CMSurface,
-                shape = RoundedCornerShape(16.dp)
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text("CineMotion Editor", color = CMTeal, fontWeight = FontWeight.Bold)
-                    Spacer(modifier = Modifier.height(5.dp))
-                    Text("Video editing workspace", color = CMMuted, fontSize = 12.sp)
-                }
-            }
-        }
     }
 }
