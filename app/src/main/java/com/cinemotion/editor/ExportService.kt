@@ -4,11 +4,15 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
+import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.net.Uri
 import android.os.Build
 import android.os.IBinder
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 class ExportService : Service() {
 
@@ -90,19 +94,23 @@ class ExportService : Service() {
             .getIntExtra(EXTRA_IMAGE_DURATION, 3)
             .coerceIn(1, 60)
 
-        // Per-clip trim / split / speed data from the editor timeline.
-        val starts = intent.getLongArrayExtra(MediaEditor.EXTRA_CLIP_STARTS)
-        val ends = intent.getLongArrayExtra(MediaEditor.EXTRA_CLIP_ENDS)
-        val speeds = intent.getFloatArrayExtra(MediaEditor.EXTRA_CLIP_SPEEDS)
-
         val edits = MediaEditor.editsFrom(
             uris = uriStrings,
             imageFlags = imageFlags,
             defaultImageSeconds = imageDuration,
-            starts = starts,
-            ends = ends,
-            speeds = speeds
+            starts = intent.getLongArrayExtra(MediaEditor.EXTRA_CLIP_STARTS),
+            ends = intent.getLongArrayExtra(MediaEditor.EXTRA_CLIP_ENDS),
+            speeds = intent.getFloatArrayExtra(MediaEditor.EXTRA_CLIP_SPEEDS),
+            transitions =
+                intent.getStringArrayListExtra(MediaEditor.EXTRA_CLIP_TRANSITIONS),
+            mutes = intent.getBooleanArrayExtra(MediaEditor.EXTRA_CLIP_MUTES)
         )
+
+        val heightPx = intent.getIntExtra(MediaEditor.EXTRA_HEIGHT, 0)
+        val fps = intent.getIntExtra(MediaEditor.EXTRA_FPS, 30)
+        val aspect = intent.getFloatExtra(MediaEditor.EXTRA_ASPECT, 0f)
+        val transitionMs =
+            intent.getIntExtra(MediaEditor.EXTRA_TRANSITION_MS, 600).toLong()
 
         val musicUri = intent.getStringExtra(EXTRA_MUSIC_URI)
             ?.takeIf { it.isNotBlank() }
@@ -114,6 +122,10 @@ class ExportService : Service() {
             MediaEditor(applicationContext).exportEdited(
                 edits = edits,
                 musicUri = musicUri,
+                heightPx = heightPx,
+                frameRate = fps,
+                transitionMs = transitionMs,
+                aspect = aspect,
                 onProgress = { progress ->
                     val safeProgress = progress.coerceIn(0, 100)
                     notificationManager.notify(
@@ -125,6 +137,8 @@ class ExportService : Service() {
                     )
                 },
                 onComplete = { outputUri ->
+                    saveToHistory(outputUri)
+
                     notificationManager.notify(
                         NOTIFICATION_ID,
                         buildNotification("Export complete", 100)
@@ -151,6 +165,22 @@ class ExportService : Service() {
         }
 
         return START_NOT_STICKY
+    }
+
+    /** Keeps a list of finished exports so the Projects > Exports tab can show them. */
+    private fun saveToHistory(outputUri: Uri) {
+        try {
+            val prefs = getSharedPreferences("cinemotion_main", Context.MODE_PRIVATE)
+            val title = "CineMotion " +
+                SimpleDateFormat("MMM d, HH:mm", Locale.getDefault()).format(Date())
+            val old = prefs.getString("exports", "") ?: ""
+            val line = "$outputUri\t$title"
+            prefs.edit()
+                .putString("exports", if (old.isBlank()) line else "$line\n$old")
+                .apply()
+        } catch (_: Exception) {
+            // History is a convenience; ignore failures.
+        }
     }
 
     private fun startForegroundSafely(notification: Notification) {
