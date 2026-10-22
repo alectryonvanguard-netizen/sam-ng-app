@@ -2,6 +2,7 @@ package com.cinemotion.editor
 
 import android.content.ContentValues
 import android.content.Context
+import android.graphics.Matrix
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
@@ -9,10 +10,15 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.MediaStore
 import androidx.annotation.OptIn
+import androidx.media3.common.Effect
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
+import androidx.media3.common.audio.AudioProcessor
 import androidx.media3.common.audio.SonicAudioProcessor
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.effect.MatrixTransformation
+import androidx.media3.effect.Presentation
+import androidx.media3.effect.RgbMatrix
 import androidx.media3.effect.SpeedChangeEffect
 import androidx.media3.transformer.Composition
 import androidx.media3.transformer.EditedMediaItem
@@ -29,27 +35,37 @@ import java.util.concurrent.atomic.AtomicBoolean
  *
  * Supports:
  * - Ordered photos and videos
- * - A configurable default photo duration
  * - Per-clip photo durations
- * - Video start/end trimming (from the editor's Trim and Split tools)
- * - Per-clip video speed (from the editor's Speed tool)
+ * - Video start/end trimming (Trim and Split tools)
+ * - Per-clip video speed (needs Media3 1.3+)
+ * - Transitions at the end of each clip (see note below)
+ * - Output resolution and frame rate
  * - Optional looping background music
  * - MP4 export to Movies/CineMotion
  *
+ * Transition note: Media3 plays clips back to back, so exported transitions are
+ * rendered as an "out then in" effect on the two neighbouring clips (fade, slide,
+ * zoom, whip pan). The editor preview shows the overlapping version.
+ *
  * All trim times are in milliseconds.
- * Speed requires Media3 1.3 or newer (SpeedChangeEffect).
  */
 class MediaEditor(private val context: Context) {
 
     companion object {
-        // Must match the keys MainActivity puts on the export Intent.
+        // Keys shared with MainActivity and ExportService.
         const val EXTRA_CLIP_STARTS = "com.cinemotion.editor.extra.CLIP_STARTS"
         const val EXTRA_CLIP_ENDS = "com.cinemotion.editor.extra.CLIP_ENDS"
         const val EXTRA_CLIP_SPEEDS = "com.cinemotion.editor.extra.CLIP_SPEEDS"
+        const val EXTRA_CLIP_TRANSITIONS = "com.cinemotion.editor.extra.CLIP_TRANSITIONS"
+        const val EXTRA_HEIGHT = "com.cinemotion.editor.extra.HEIGHT"
+        const val EXTRA_FPS = "com.cinemotion.editor.extra.FPS"
+        const val EXTRA_TRANSITION_MS = "com.cinemotion.editor.extra.TRANSITION_MS"
+        const val EXTRA_ASPECT = "com.cinemotion.editor.extra.ASPECT"
+        const val EXTRA_CLIP_MUTES = "com.cinemotion.editor.extra.CLIP_MUTES"
 
         /**
          * Builds per-clip edits from the data MainActivity sends to ExportService.
-         * The three arrays may be null (older callers); defaults are used then.
+         * Every array may be null (older callers); defaults are used then.
          */
         fun editsFrom(
             uris: List<String>,
@@ -57,7 +73,9 @@ class MediaEditor(private val context: Context) {
             defaultImageSeconds: Int,
             starts: LongArray?,
             ends: LongArray?,
-            speeds: FloatArray?
+            speeds: FloatArray?,
+            transitions: List<String>? = null,
+            mutes: BooleanArray? = null
         ): List<ClipEdit> {
             return uris.mapIndexed { i, uriString ->
                 val isImage = imageFlags.getOrNull(i) ?: false
@@ -74,7 +92,12 @@ class MediaEditor(private val context: Context) {
                     } else 3_000L,
                     startMs = if (isImage) 0L else start,
                     endMs = if (isImage) null else end,
-                    speed = if (isImage) 1f else speed
+                    speed = if (isImage) 1f else speed,
+                    muted = mutes?.getOrNull(i) ?: false,
+                    transitionOut =
+                        if (i < uris.lastIndex) transitions?.getOrNull(i) ?: "None" else "None",
+                    transitionIn =
+                        if (i > 0) transitions?.getOrNull(i - 1) ?: "None" else "None"
                 )
             }
         }
@@ -93,6 +116,7 @@ class MediaEditor(private val context: Context) {
      * For videos, startMs and endMs define the retained interval
      * (leave endMs null to use the video's natural end) and speed
      * changes playback rate (1f = normal).
+     * transitionOut plays at the end of this clip, transitionIn at its start.
      */
     data class ClipEdit(
         val uri: Uri,
@@ -100,7 +124,10 @@ class MediaEditor(private val context: Context) {
         val durationMs: Long = 3_000L,
         val startMs: Long = 0L,
         val endMs: Long? = null,
-        val speed: Float = 1f
+        val speed: Float = 1f,
+        val transitionOut: String = "None",
+        val transitionIn: String = "None",
+        val muted: Boolean = false
     )
 
     /**
@@ -135,6 +162,67 @@ class MediaEditor(private val context: Context) {
         )
     }
 
+    // -----------------------------------------------------------------------
+    // Transition effects
+    // -----------------------------------------------------------------------
+    @OptIn(UnstableApi::class)
+    private fun transitionEffects(
+        name: String,
+        outgoing: Boolean,
+        lengthUs: Long,
+        durUs: Long
+    ): List<Effect> {
+        if (name == "None" || durUs <= 0L || lengthUs <= durUs * 2) return emptyList()
+
+        // Visibility of the clip: 1 = fully shown, 0 = hidden.
+        fun visibility(us: Long): Float =
+            if (outgoing) {
+                1f - ((us - (lengthUs - durUs)).toFloat() / durUs).coerceIn(0f, 1f)
+            } else {
+                (us.toFloat() / durUs).coerceIn(0f, 1f)
+            }
+
+        fun smooth(x: Float): Float = x * x * (3f - 2f * x)
+        val sign = if (outgoing) -1f else 1f
+
+        val fade = RgbMatrix { us, _ ->
+            val v = visibility(us)
+            val s = if (name == "Fade") v else smooth(v)
+            floatArrayOf(
+                s, 0f, 0f, 0f,
+                0f, s, 0f, 0f,
+                0f, 0f, s, 0f,
+                0f, 0f, 0f, 1f
+            )
+        }
+
+        return when (name) {
+            "Slide", "Whip Pan" -> listOf(
+                MatrixTransformation { us ->
+                    val v = visibility(us)
+                    val k = if (name == "Whip Pan") {
+                        val q = 1f - v
+                        q * q * q
+                    } else {
+                        1f - smooth(v)
+                    }
+                    Matrix().apply { postTranslate(sign * 2f * k, 0f) }
+                }
+            )
+
+            "Zoom" -> listOf(
+                MatrixTransformation { us ->
+                    val v = visibility(us)
+                    val s = if (outgoing) 1f + 0.9f * (1f - v) else 0.85f + 0.15f * v
+                    Matrix().apply { postScale(s, s) }
+                },
+                fade
+            )
+
+            else -> listOf(fade) // Crossfade, Fade, Dissolve
+        }
+    }
+
     /**
      * Export with individual clip edit settings.
      */
@@ -142,6 +230,10 @@ class MediaEditor(private val context: Context) {
     fun exportEdited(
         edits: List<ClipEdit>,
         musicUri: Uri?,
+        heightPx: Int = 0,
+        frameRate: Int = 30,
+        transitionMs: Long = 600L,
+        aspect: Float = 0f,
         onProgress: (Int) -> Unit,
         onComplete: (Uri) -> Unit,
         onError: (String) -> Unit
@@ -207,10 +299,13 @@ class MediaEditor(private val context: Context) {
                 val mediaItemBuilder = MediaItem.Builder()
                     .setUri(edit.uri)
 
+                // Output length of this clip in microseconds (null when unknown).
+                var lengthUs: Long? = null
+
                 if (edit.isImage) {
-                    mediaItemBuilder.setImageDurationMs(
-                        edit.durationMs.coerceIn(1_000L, 300_000L)
-                    )
+                    val d = edit.durationMs.coerceIn(1_000L, 300_000L)
+                    mediaItemBuilder.setImageDurationMs(d)
+                    lengthUs = d * 1000L
                 } else {
                     val clippingBuilder =
                         MediaItem.ClippingConfiguration.Builder()
@@ -218,29 +313,40 @@ class MediaEditor(private val context: Context) {
 
                     if (edit.endMs != null) {
                         clippingBuilder.setEndPositionMs(edit.endMs)
+                        lengthUs = ((edit.endMs - edit.startMs) / edit.speed).toLong() * 1000L
                     }
 
                     mediaItemBuilder
                         .setClippingConfiguration(clippingBuilder.build())
                 }
 
-                val effects =
-                    if (!edit.isImage && edit.speed != 1f) {
-                        val audioSpeed = SonicAudioProcessor().apply {
+                val audioProcessors = mutableListOf<AudioProcessor>()
+                val videoEffects = mutableListOf<Effect>()
+
+                if (!edit.isImage && edit.speed != 1f) {
+                    audioProcessors.add(
+                        SonicAudioProcessor().apply {
                             setSpeed(edit.speed)
                             setPitch(1f)
                         }
-                        Effects(
-                            listOf(audioSpeed),
-                            listOf(SpeedChangeEffect(edit.speed))
-                        )
-                    } else {
-                        Effects(emptyList(), emptyList())
-                    }
+                    )
+                    videoEffects.add(SpeedChangeEffect(edit.speed))
+                }
+
+                if (lengthUs != null) {
+                    val dur = minOf(transitionMs * 1000L, lengthUs / 2)
+                    videoEffects.addAll(
+                        transitionEffects(edit.transitionIn, false, lengthUs, dur)
+                    )
+                    videoEffects.addAll(
+                        transitionEffects(edit.transitionOut, true, lengthUs, dur)
+                    )
+                }
 
                 EditedMediaItem.Builder(mediaItemBuilder.build())
-                    .setFrameRate(30)
-                    .setEffects(effects)
+                    .setFrameRate(frameRate.coerceIn(15, 60))
+                    .setEffects(Effects(audioProcessors, videoEffects))
+                    .setRemoveAudio(edit.muted)
                     .build()
             }
 
@@ -270,7 +376,25 @@ class MediaEditor(private val context: Context) {
                 sequences.add(musicSequence)
             }
 
-            val composition = Composition.Builder(sequences).build()
+            val compositionBuilder = Composition.Builder(sequences)
+            val compEffects = mutableListOf<Effect>()
+            if (aspect > 0f) {
+                compEffects.add(
+                    Presentation.createForAspectRatio(
+                        aspect,
+                        Presentation.LAYOUT_SCALE_TO_FIT_WITH_CROP
+                    )
+                )
+            }
+            if (heightPx > 0) {
+                // Portrait canvases use the quality as the short side (1080p = 1080x1920).
+                val h = if (aspect in 0.01f..0.999f) (heightPx / aspect).toInt() else heightPx
+                compEffects.add(Presentation.createForHeight(h and 1.inv()))
+            }
+            if (compEffects.isNotEmpty()) {
+                compositionBuilder.setEffects(Effects(emptyList(), compEffects))
+            }
+            val composition = compositionBuilder.build()
 
             val transformer = Transformer.Builder(context)
                 .setVideoMimeType(MimeTypes.VIDEO_H264)
