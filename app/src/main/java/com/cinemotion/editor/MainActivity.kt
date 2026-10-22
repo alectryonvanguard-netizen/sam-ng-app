@@ -11,7 +11,10 @@ import android.media.MediaMetadataRetriever
 import android.media.MediaPlayer
 import android.net.Uri
 import android.os.Build
+import android.content.ContentValues
 import android.os.Bundle
+import android.os.Environment
+import android.provider.MediaStore
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -108,6 +111,7 @@ private const val GLOBAL_EFFECT_ID = -2L
 private const val KIND_TEXT = 0
 private const val KIND_STICKER = 1
 private const val KIND_EFFECT = 2
+private const val KIND_CAPTION = 3
 
 private enum class CMPage { HOME, EDITOR, TEMPLATES, PROJECTS, SETTINGS }
 
@@ -123,7 +127,9 @@ private class ExportRequest(
     val transitions: List<String>,
     val heightPx: Int,
     val fps: Int,
-    val transitionMs: Int
+    val transitionMs: Int,
+    val aspect: Float,
+    val mutes: BooleanArray
 )
 
 private class Template(
@@ -201,6 +207,8 @@ private class TLClip(
     var speed by mutableFloatStateOf(1f)
     var transition by mutableStateOf(initialTransition)
     var thumb by mutableStateOf<Bitmap?>(null)
+    var muted by mutableStateOf(false)
+    var filter by mutableStateOf<String?>(null)
 
     val lengthMs: Long
         get() = ((endMs - startMs) / speed).toLong().coerceAtLeast(300L)
@@ -216,6 +224,23 @@ private class Overlay(
     var startMs by mutableLongStateOf(start)
     var lengthMs by mutableLongStateOf(length)
 }
+
+private class ClipSnap(
+    val uid: Long, val start: Long, val end: Long, val speed: Float,
+    val transition: String, val muted: Boolean, val filter: String?
+)
+
+private class OverlaySnap(
+    val uid: Long, val kind: Int, val label: String, val start: Long, val length: Long
+)
+
+private class Snap(
+    val clips: List<ClipSnap>,
+    val overlays: List<OverlaySnap>,
+    val music: Uri?,
+    val beats: List<Long>,
+    val effect: String?
+)
 
 private class EditorState {
     val clips = mutableStateListOf<TLClip>()
@@ -233,6 +258,86 @@ private class EditorState {
     var selKind by mutableIntStateOf(SEL_NONE)
     var selId by mutableLongStateOf(-1L)
     var fullscreen by mutableStateOf(false)
+    var panel by mutableStateOf<String?>(null)
+    var menu by mutableStateOf("main")
+    var ratio by mutableStateOf("9:16")
+    var historyTick by mutableIntStateOf(0)
+
+    val pool = HashMap<Long, TLClip>()
+    private val history = ArrayList<Snap>()
+    private val future = ArrayList<Snap>()
+
+    val canUndo: Boolean get() = historyTick >= 0 && history.isNotEmpty()
+    val canRedo: Boolean get() = historyTick >= 0 && future.isNotEmpty()
+
+    val aspectValue: Float
+        get() = when (ratio) {
+            "16:9" -> 16f / 9f
+            "1:1" -> 1f
+            "4:5" -> 0.8f
+            "3:4" -> 0.75f
+            else -> 9f / 16f
+        }
+
+    fun register(c: TLClip) {
+        pool[c.uid] = c
+    }
+
+    private fun snap() = Snap(
+        clips.map { ClipSnap(it.uid, it.startMs, it.endMs, it.speed, it.transition, it.muted, it.filter) },
+        overlays.map { OverlaySnap(it.uid, it.kind, it.label, it.startMs, it.lengthMs) },
+        musicUri,
+        beats.toList(),
+        globalEffect
+    )
+
+    /** Call before a change so it can be undone. */
+    fun commit() {
+        history.add(snap())
+        if (history.size > 60) history.removeAt(0)
+        future.clear()
+        historyTick++
+    }
+
+    private fun restore(s: Snap) {
+        val list = s.clips.mapNotNull { cs ->
+            pool[cs.uid]?.also {
+                it.startMs = cs.start
+                it.endMs = cs.end
+                it.speed = cs.speed
+                it.transition = cs.transition
+                it.muted = cs.muted
+                it.filter = cs.filter
+            }
+        }
+        clips.clear()
+        clips.addAll(list)
+        overlays.clear()
+        overlays.addAll(s.overlays.map { Overlay(it.uid, it.kind, it.label, it.start, it.length) })
+        musicUri = s.music
+        beats.clear()
+        beats.addAll(s.beats)
+        globalEffect = s.effect
+        selKind = SEL_NONE
+        selId = -1L
+        seekTo(positionMs)
+    }
+
+    fun undo(): Boolean {
+        if (history.isEmpty()) return false
+        future.add(snap())
+        restore(history.removeAt(history.lastIndex))
+        historyTick++
+        return true
+    }
+
+    fun redo(): Boolean {
+        if (future.isEmpty()) return false
+        history.add(snap())
+        restore(future.removeAt(future.lastIndex))
+        historyTick++
+        return true
+    }
 
     private var counter = 1L
     fun newId(): Long = counter++
@@ -299,6 +404,7 @@ private class EditorState {
         if (local < 500L || c.lengthMs - local < 500L) {
             return "Move the playhead inside a clip to split it"
         }
+        commit()
         val cut = c.startMs + (local * c.speed).toLong()
         val second = TLClip(c.clip, newId(), c.endMs, c.transition).also {
             it.startMs = cut
@@ -309,6 +415,7 @@ private class EditorState {
         }
         c.endMs = cut
         c.transition = "None"
+        pool[second.uid] = second
         clips.add(loc.first + 1, second)
         selKind = SEL_CLIP
         selId = second.uid
@@ -333,6 +440,7 @@ private class EditorState {
         }
         val bounds = grid.filterIndexed { i, _ -> i % every.coerceAtLeast(1) == 0 }
 
+        commit()
         var cursor = 0L
         clips.forEach { c ->
             if (c.clip.isImage) {
@@ -355,6 +463,7 @@ private class EditorState {
     }
 
     fun deleteSelected(): String {
+        if (selKind != SEL_NONE) commit()
         val msg = when (selKind) {
             SEL_CLIP -> {
                 clips.removeAll { it.uid == selId }
@@ -378,6 +487,12 @@ private class EditorState {
     }
 
     fun reset() {
+        history.clear()
+        future.clear()
+        pool.clear()
+        historyTick++
+        panel = null
+        menu = "main"
         clips.clear()
         overlays.clear()
         beats.clear()
@@ -568,6 +683,8 @@ class MainActivity : ComponentActivity() {
                                 putExtra(MediaEditor.EXTRA_HEIGHT, req.heightPx)
                                 putExtra(MediaEditor.EXTRA_FPS, req.fps)
                                 putExtra(MediaEditor.EXTRA_TRANSITION_MS, req.transitionMs)
+                                putExtra(MediaEditor.EXTRA_ASPECT, req.aspect)
+                                putExtra(MediaEditor.EXTRA_CLIP_MUTES, req.mutes)
                             }
 
                         try {
@@ -669,6 +786,7 @@ private fun CineMotionApp(
         ActivityResultContracts.OpenMultipleDocuments()
     ) { uris ->
         if (uris.isNotEmpty()) {
+            ed.commit()
             uris.forEach { uri ->
                 try {
                     context.contentResolver.takePersistableUriPermission(
@@ -692,6 +810,7 @@ private fun CineMotionApp(
                     if (isImage) settings.photoSec * 1000L else 3_000L,
                     ed.defaultTransition
                 )
+                ed.register(tl)
                 ed.clips.add(tl)
                 loadInto(tl, fixDuration = true)
             }
@@ -777,6 +896,7 @@ private fun CineMotionApp(
                     val tl = TLClip(clip, ed.newId(), end, p[8])
                     tl.startMs = p[5].toLongOrNull() ?: 0L
                     tl.speed = p[7].toFloatOrNull() ?: 1f
+                    ed.register(tl)
                     ed.clips.add(tl)
                     loadInto(tl, fixDuration = false)
                 }
@@ -820,7 +940,9 @@ private fun CineMotionApp(
                 transitions = list.map { it.transition },
                 heightPx = settings.heightPx,
                 fps = settings.fps,
-                transitionMs = settings.transitionMs
+                transitionMs = settings.transitionMs,
+                aspect = ed.aspectValue,
+                mutes = BooleanArray(list.size) { list[it].muted }
             )
         )
 
@@ -931,7 +1053,10 @@ private fun CineMotionApp(
 
     BackHandler(enabled = page != CMPage.HOME) {
         if (page == CMPage.EDITOR && ed.fullscreen) ed.fullscreen = false
-        else page = CMPage.HOME
+        else if (page == CMPage.EDITOR && (ed.panel != null || ed.menu != "main")) {
+            ed.panel = null
+            ed.menu = "main"
+        } else page = CMPage.HOME
     }
 
     Scaffold(
@@ -957,7 +1082,8 @@ private fun CineMotionApp(
             CMPage.EDITOR -> EditorScreen(
                 ed = ed,
                 isExporting = isExporting,
-                onBack = { page = CMPage.HOME },
+                settings = settings,
+                onClose = { page = CMPage.HOME },
                 onAddMedia = { mediaPicker.launch(arrayOf("image/*", "video/*")) },
                 onAddAudio = { audioPicker.launch(arrayOf("audio/*")) },
                 onSaveDraft = { saveDraft() },
@@ -2024,13 +2150,42 @@ private fun InfoDialog(title: String, body: String, onDismiss: () -> Unit) {
 }
 
 // ---------------------------------------------------------------------------
-// Editor screen
+// Editor screen (layout inspired by popular mobile video editors)
 // ---------------------------------------------------------------------------
+private val RATIOS = listOf("9:16", "16:9", "1:1", "4:5", "3:4")
+private val CMCyan = Color(0xFF16D3EB)
+private val CMLane = Color(0xFF1B2336)
+
+private fun saveFrame(context: Context, bmp: Bitmap): Boolean {
+    return try {
+        val values = ContentValues().apply {
+            put(MediaStore.Images.Media.DISPLAY_NAME, "CineMotion_cover_${System.currentTimeMillis()}.jpg")
+            put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                put(
+                    MediaStore.Images.Media.RELATIVE_PATH,
+                    "${Environment.DIRECTORY_PICTURES}/CineMotion"
+                )
+            }
+        }
+        val uri = context.contentResolver.insert(
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values
+        ) ?: return false
+        context.contentResolver.openOutputStream(uri)?.use {
+            bmp.compress(Bitmap.CompressFormat.JPEG, 95, it)
+        } ?: return false
+        true
+    } catch (_: Exception) {
+        false
+    }
+}
+
 @Composable
 private fun EditorScreen(
     ed: EditorState,
     isExporting: Boolean,
-    onBack: () -> Unit,
+    settings: AppSettings,
+    onClose: () -> Unit,
     onAddMedia: () -> Unit,
     onAddAudio: () -> Unit,
     onSaveDraft: () -> Unit,
@@ -2040,7 +2195,9 @@ private fun EditorScreen(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-    var showHelp by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    var dialog by remember { mutableStateOf<String?>(null) }
+    var search by remember { mutableStateOf("") }
 
     val totalNow by rememberUpdatedState(ed.totalMs)
 
@@ -2099,121 +2256,529 @@ private fun EditorScreen(
         onDispose { try { musicNow?.release() } catch (_: Exception) { } }
     }
 
+    // ----- Tool actions ----------------------------------------------------
+    fun needClips(): Boolean {
+        if (ed.clips.isEmpty()) {
+            notify("Add photos or videos first")
+            return false
+        }
+        return true
+    }
+
+    fun selectTarget() {
+        if (ed.selKind != SEL_CLIP) {
+            ed.targetClip()?.let {
+                ed.selKind = SEL_CLIP
+                ed.selId = it.uid
+            }
+        }
+    }
+
+    fun openPanel(p: String) {
+        if (p in listOf("trim", "speed", "transition", "filters", "effects") && !needClips()) return
+        if (p in listOf("trim", "speed", "transition", "filters")) selectTarget()
+        ed.panel = p
+    }
+
+    fun openEdit() {
+        if (!needClips()) return
+        selectTarget()
+        ed.panel = null
+        ed.menu = "edit"
+    }
+
+    fun duplicateClip() {
+        val c = ed.targetClip()
+        if (c == null) {
+            notify("Add photos or videos first")
+            return
+        }
+        ed.commit()
+        val copy = TLClip(c.clip, ed.newId(), c.endMs, c.transition).also {
+            it.startMs = c.startMs
+            it.sourceMs = c.sourceMs
+            it.durationKnown = c.durationKnown
+            it.speed = c.speed
+            it.muted = c.muted
+            it.filter = c.filter
+            it.thumb = c.thumb
+        }
+        ed.register(copy)
+        val i = ed.clips.indexOfFirst { it.uid == c.uid }
+        ed.clips.add(i + 1, copy)
+        ed.selKind = SEL_CLIP
+        ed.selId = copy.uid
+        notify("Clip duplicated")
+    }
+
+    fun toggleMute() {
+        val c = ed.targetClip()
+        if (c == null) {
+            notify("Add photos or videos first")
+            return
+        }
+        ed.commit()
+        c.muted = !c.muted
+        notify(if (c.muted) "Clip muted" else "Clip sound on")
+    }
+
+    fun muteAll() {
+        if (!needClips()) return
+        ed.commit()
+        val mute = !ed.clips.all { it.muted }
+        ed.clips.forEach { it.muted = mute }
+        notify(if (mute) "All clips muted" else "Clip sound on")
+    }
+
+    fun deleteSelection() {
+        if (ed.selKind == SEL_NONE) selectTarget()
+        notify(ed.deleteSelected())
+        ed.panel = null
+    }
+
+    fun saveCover() {
+        val loc = ed.locate(ed.positionMs)
+        val c = loc?.let { ed.clips.getOrNull(it.first) }
+        if (loc == null || c == null) {
+            notify("Add photos or videos first")
+            return
+        }
+        val src = c.startMs + (loc.second * c.speed).toLong()
+        scope.launch {
+            val bmp = withContext(Dispatchers.IO) {
+                if (c.clip.isImage) c.thumb else loadMedia(context, c.clip, src).first ?: c.thumb
+            }
+            val ok = bmp != null && withContext(Dispatchers.IO) { saveFrame(context, bmp) }
+            notify(if (ok) "Cover saved to Pictures/CineMotion" else "Couldn't save the cover")
+        }
+    }
+
+    fun removeMusic() {
+        if (ed.musicUri == null) {
+            notify("No audio to remove")
+            return
+        }
+        ed.commit()
+        ed.musicUri = null
+        notify("Audio removed")
+    }
+
+    val searchTools: List<Pair<String, () -> Unit>> = listOf(
+        "Split" to { notify(ed.split()) },
+        "Trim" to { openPanel("trim") },
+        "Speed" to { openPanel("speed") },
+        "Mute clip" to { toggleMute() },
+        "Transition" to { openPanel("transition") },
+        "Duplicate" to { duplicateClip() },
+        "Delete" to { deleteSelection() },
+        "Add audio" to { onAddAudio() },
+        "Beat sync" to { ed.menu = "audio"; openPanel("beat") },
+        "Text" to { openPanel("text") },
+        "Effects" to { openPanel("effects") },
+        "Stickers" to { openPanel("stickers") },
+        "Captions" to { openPanel("captions") },
+        "Filters" to { openPanel("filters") },
+        "Cover" to { saveCover() },
+        "Save draft" to { onSaveDraft() }
+    )
+
     Column(modifier = modifier) {
         EditorTopBar(
             isExporting = isExporting,
-            onBack = onBack,
-            onHelp = { showHelp = true },
+            quality = settings.quality,
+            onClose = {
+                if (ed.clips.isEmpty()) onClose() else dialog = "exit"
+            },
+            onSearch = {
+                search = ""
+                dialog = "search"
+            },
+            onPro = { notify("Every feature in CineMotion is free") },
+            onQuality = { dialog = "quality" },
             onExport = onExport
         )
 
         if (ed.fullscreen) {
-            PreviewArea(ed, onAddMedia, Modifier.fillMaxWidth().weight(1f))
-            PlayerControls(ed, notify)
+            PreviewFit(ed, onAddMedia, Modifier.weight(1f).fillMaxWidth())
+            EditorControls(ed, notify)
         } else {
-            Column(
-                modifier = Modifier
-                    .weight(1f)
-                    .verticalScroll(rememberScrollState())
-            ) {
-                PreviewArea(ed, onAddMedia, Modifier.fillMaxWidth().aspectRatio(16f / 9f))
-                PlayerControls(ed, notify)
-                TimelineArea(ed, onAddMedia, onAddAudio)
-                ToolsPanel(ed, notify, onDetectBeats)
+            PreviewFit(ed, onAddMedia, Modifier.weight(1f).fillMaxWidth())
+            EditorControls(ed, notify)
+            TimelineArea(
+                ed = ed,
+                onAddMedia = onAddMedia,
+                onAddAudio = onAddAudio,
+                onCover = { saveCover() },
+                onMuteAll = { muteAll() },
+                onTextTap = { openPanel("text") }
+            )
 
+            val panel = ed.panel
+            if (panel != null) {
+                val title = when (panel) {
+                    "trim" -> "Trim"
+                    "speed" -> "Speed"
+                    "transition" -> "Transition"
+                    "beat" -> "Beat sync"
+                    "effects" -> "Effects"
+                    "stickers" -> "Overlay"
+                    "text" -> "Text"
+                    "captions" -> "Captions"
+                    "filters" -> "Filters"
+                    else -> ""
+                }
+                BottomPanel(
+                    title = title,
+                    onClose = { ed.panel = null },
+                    onDelete = if (ed.selKind != SEL_NONE) ({ deleteSelection() }) else null
+                ) {
+                    when (panel) {
+                        "trim" -> TrimPanel(ed)
+                        "speed" -> SpeedPanel(ed, notify)
+                        "transition" -> TransitionPanel(ed, notify)
+                        "beat" -> BeatPanel(ed, notify, onDetectBeats)
+                        "effects" -> EffectsPanel(ed, notify)
+                        "stickers" -> StickersPanel(ed)
+                        "text" -> TextPanel(ed, KIND_TEXT, notify)
+                        "captions" -> TextPanel(ed, KIND_CAPTION, notify)
+                        "filters" -> FiltersPanel(ed, notify)
+                    }
+                }
+            } else {
+                val clip = ed.targetClip()
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .background(CMPanel)
-                        .padding(horizontal = 12.dp, vertical = 10.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        .background(CMBackground)
+                        .horizontalScroll(rememberScrollState())
+                        .padding(vertical = 6.dp)
                 ) {
-                    OutlinedButton(onClick = onAddMedia, modifier = Modifier.weight(1f)) {
-                        Text("+ Media", color = CMTeal, fontSize = 12.sp, maxLines = 1)
-                    }
-                    OutlinedButton(onClick = onAddAudio, modifier = Modifier.weight(1f)) {
-                        Text("♫ Audio", color = CMIce, fontSize = 12.sp, maxLines = 1)
-                    }
-                    OutlinedButton(onClick = onSaveDraft, modifier = Modifier.weight(1f)) {
-                        Text("Save draft", color = CMIce, fontSize = 12.sp, maxLines = 1)
+                    when (ed.menu) {
+                        "edit" -> {
+                            ToolButton("‹", "Back") { ed.menu = "main" }
+                            ToolButton("◧", "Split") { notify(ed.split()) }
+                            ToolButton("⇔", "Trim") { openPanel("trim") }
+                            ToolButton("◔", "Speed") { openPanel("speed") }
+                            ToolButton(
+                                if (clip?.muted == true) "🔇" else "🔊",
+                                if (clip?.muted == true) "Unmute" else "Mute"
+                            ) { toggleMute() }
+                            ToolButton("⋈", "Transition") { openPanel("transition") }
+                            ToolButton("❐", "Duplicate") { duplicateClip() }
+                            ToolButton("✕", "Delete", CMAmber) { deleteSelection() }
+                        }
+                        "audio" -> {
+                            ToolButton("‹", "Back") { ed.menu = "main" }
+                            ToolButton("♫", "Music") { onAddAudio() }
+                            ToolButton("♪", "Beat sync") { openPanel("beat") }
+                            ToolButton("✕", "Remove", CMAmber) { removeMusic() }
+                        }
+                        else -> {
+                            if (ed.selKind != SEL_NONE) {
+                                ToolButton("✕", "Delete", CMAmber) { deleteSelection() }
+                            }
+                            ToolButton("✂", "Edit") { openEdit() }
+                            ToolButton("♫", "Audio") { ed.menu = "audio" }
+                            ToolButton("T", "Text") { openPanel("text") }
+                            ToolButton("✦", "Effects") { openPanel("effects") }
+                            ToolButton("▣", "Overlay") { openPanel("stickers") }
+                            ToolButton("▤", "Captions") { openPanel("captions") }
+                            ToolButton("◐", "Filters") { openPanel("filters") }
+                        }
                     }
                 }
             }
         }
     }
 
-    if (showHelp) {
-        InfoDialog(
-            "Quick guide",
-            "• Drag the timeline left or right to scrub.\n" +
-                "• Tap a clip, then choose a tool below.\n" +
-                "• Tap the ⋈ marker at the end of a clip to pick its transition.\n" +
-                "• Beat: detect the music's tempo, then sync your cuts to it.\n" +
-                "• Stickers, Text and Effects are added at the playhead.\n" +
-                "• Select any item and press Delete to remove it."
-        ) { showHelp = false }
+    // ----- Dialogs ---------------------------------------------------------
+    when (dialog) {
+        "exit" -> AlertDialog(
+            onDismissRequest = { dialog = null },
+            containerColor = CMSurface,
+            title = { Text("Leave the editor?", color = CMText) },
+            text = { Text("Save your project as a draft so you can pick it up later.", color = CMMuted) },
+            confirmButton = {
+                Row {
+                    TextButton(onClick = { dialog = null }) { Text("Cancel", color = CMMuted) }
+                    TextButton(onClick = { dialog = null; onClose() }) {
+                        Text("Discard", color = CMAmber)
+                    }
+                    TextButton(onClick = {
+                        dialog = null
+                        onSaveDraft()
+                        onClose()
+                    }) { Text("Save draft", color = CMTeal) }
+                }
+            }
+        )
+        "quality" -> ChoiceDialog(
+            "Export quality",
+            listOf("720p", "1080p", "4K"),
+            settings.quality,
+            { when (it) { "720p" -> "720p HD"; "1080p" -> "1080p Full HD"; else -> "4K Ultra HD" } },
+            { settings.quality = it; settings.save() },
+            { dialog = null }
+        )
+        "search" -> {
+            val shown = searchTools.filter { it.first.contains(search, ignoreCase = true) }
+            AlertDialog(
+                onDismissRequest = { dialog = null },
+                containerColor = CMSurface,
+                title = { Text("Find a tool", color = CMText) },
+                text = {
+                    Column {
+                        BasicTextField(
+                            value = search,
+                            onValueChange = { search = it },
+                            singleLine = true,
+                            textStyle = TextStyle(color = CMText, fontSize = 15.sp),
+                            cursorBrush = SolidColor(CMTeal),
+                            modifier = Modifier.fillMaxWidth(),
+                            decorationBox = { inner ->
+                                Box(
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .background(CMSurface2, RoundedCornerShape(12.dp))
+                                        .padding(horizontal = 14.dp, vertical = 12.dp)
+                                ) {
+                                    if (search.isEmpty()) Text("Search tools", color = CMMuted)
+                                    inner()
+                                }
+                            }
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        Column(
+                            Modifier
+                                .heightIn(max = 260.dp)
+                                .verticalScroll(rememberScrollState())
+                        ) {
+                            shown.forEach { (name, run) ->
+                                Text(
+                                    name,
+                                    color = CMText,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable {
+                                            dialog = null
+                                            run()
+                                        }
+                                        .padding(vertical = 12.dp)
+                                )
+                            }
+                            if (shown.isEmpty()) Text("No matching tools", color = CMMuted)
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { dialog = null }) { Text("Close", color = CMMuted) }
+                }
+            )
+        }
     }
 }
 
+// ---------------------------------------------------------------------------
+// Top bar, controls, panels
+// ---------------------------------------------------------------------------
 @Composable
 private fun EditorTopBar(
     isExporting: Boolean,
-    onBack: () -> Unit,
-    onHelp: () -> Unit,
+    quality: String,
+    onClose: () -> Unit,
+    onSearch: () -> Unit,
+    onPro: () -> Unit,
+    onQuality: () -> Unit,
     onExport: () -> Unit
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 10.dp),
+            .padding(horizontal = 10.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text(
-            "‹",
-            color = CMText,
-            fontSize = 34.sp,
-            modifier = Modifier
-                .clip(CircleShape)
-                .clickable(onClick = onBack)
-                .padding(horizontal = 10.dp)
-        )
-
-        Spacer(Modifier.width(6.dp))
-        BrandMark(34.dp)
-        Spacer(Modifier.width(8.dp))
-        BrandTitle(20)
+        IconTap(onClick = onClose) { PlayerIcon("close", Color.White, 22.dp) }
+        IconTap(onClick = onSearch) { PlayerIcon("search", Color.White, 24.dp) }
 
         Spacer(Modifier.weight(1f))
 
         Box(
             modifier = Modifier
-                .size(36.dp)
-                .clip(CircleShape)
-                .border(1.5.dp, CMMuted, CircleShape)
-                .clickable(onClick = onHelp),
-            contentAlignment = Alignment.Center
+                .clip(RoundedCornerShape(12.dp))
+                .background(CMSurface2)
+                .clickable(onClick = onPro)
+                .padding(horizontal = 14.dp, vertical = 10.dp)
+        ) { Text("◆", color = Color(0xFFA78BFF), fontSize = 18.sp) }
+
+        Spacer(Modifier.width(8.dp))
+
+        Row(
+            modifier = Modifier
+                .clip(RoundedCornerShape(12.dp))
+                .background(CMSurface2)
+                .clickable(onClick = onQuality)
+                .padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("?", color = CMMuted, fontWeight = FontWeight.Bold)
+            Text(quality, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
+            Text(" ▾", color = Color.White, fontSize = 13.sp)
         }
 
-        Spacer(Modifier.width(12.dp))
+        Spacer(Modifier.width(8.dp))
 
         Box(
             modifier = Modifier
                 .alpha(if (isExporting) 0.6f else 1f)
-                .clip(RoundedCornerShape(14.dp))
-                .background(CMBrand)
+                .clip(RoundedCornerShape(6.dp))
+                .background(CMCyan)
                 .clickable(enabled = !isExporting, onClick = onExport)
-                .padding(horizontal = 16.dp, vertical = 10.dp),
-            contentAlignment = Alignment.Center
+                .padding(horizontal = 18.dp, vertical = 10.dp)
         ) {
             Text(
-                if (isExporting) "Exporting…" else "↑  Export",
-                color = Color.White,
-                fontWeight = FontWeight.SemiBold,
+                if (isExporting) "Exporting…" else "Export",
+                color = Color(0xFF06222A),
+                fontWeight = FontWeight.Bold,
                 fontSize = 15.sp
             )
         }
+    }
+}
+
+@Composable
+private fun PreviewFit(ed: EditorState, onAddMedia: () -> Unit, modifier: Modifier) {
+    BoxWithConstraints(modifier = modifier.padding(vertical = 4.dp), contentAlignment = Alignment.Center) {
+        val r = ed.aspectValue
+        val w = minOf(maxWidth, maxHeight * r)
+        val h = w / r
+        PreviewArea(ed, onAddMedia, Modifier.size(w, h))
+    }
+}
+
+@Composable
+private fun EditorControls(ed: EditorState, notify: (String) -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
+            IconTap(onClick = { ed.fullscreen = !ed.fullscreen }) {
+                PlayerIcon("full", Color.White, 22.dp)
+            }
+        }
+
+        IconTap(
+            onClick = {
+                if (ed.totalMs <= 0L) notify("Add photos or videos first")
+                else ed.playing = !ed.playing
+            }
+        ) {
+            PlayerIcon(if (ed.playing) "pause" else "play", Color.White, 30.dp)
+        }
+
+        Row(
+            modifier = Modifier.weight(1f),
+            horizontalArrangement = Arrangement.End,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .border(1.5.dp, Color.White, RoundedCornerShape(8.dp))
+                    .clickable {
+                        val next = RATIOS[(RATIOS.indexOf(ed.ratio) + 1) % RATIOS.size]
+                        ed.ratio = next
+                        notify("Canvas $next")
+                    }
+                    .padding(horizontal = 7.dp, vertical = 3.dp)
+            ) { Text(ed.ratio, color = Color.White, fontSize = 11.sp) }
+
+            IconTap(onClick = {
+                if (!ed.undo()) notify("Nothing to undo")
+            }) {
+                Text("↶", color = Color.White.copy(alpha = if (ed.canUndo) 1f else 0.35f), fontSize = 24.sp)
+            }
+            IconTap(onClick = {
+                if (!ed.redo()) notify("Nothing to redo")
+            }) {
+                Text("↷", color = Color.White.copy(alpha = if (ed.canRedo) 1f else 0.35f), fontSize = 24.sp)
+            }
+        }
+    }
+}
+
+@Composable
+private fun ToolButton(
+    glyph: String,
+    label: String,
+    color: Color = CMText,
+    onClick: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .width(76.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .clickable(onClick = onClick)
+            .padding(vertical = 8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(glyph, color = color, fontSize = 24.sp)
+        Spacer(Modifier.height(4.dp))
+        Text(label, color = color, fontSize = 12.sp, maxLines = 1, softWrap = false)
+    }
+}
+
+@Composable
+private fun BottomPanel(
+    title: String,
+    onClose: () -> Unit,
+    onDelete: (() -> Unit)?,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(CMPanel, RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp))
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = 16.dp, end = 6.dp, top = 6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                title,
+                color = CMText,
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 15.sp,
+                modifier = Modifier.weight(1f)
+            )
+            if (onDelete != null) {
+                Text(
+                    "Delete",
+                    color = CMAmber,
+                    fontSize = 13.sp,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable(onClick = onDelete)
+                        .padding(horizontal = 10.dp, vertical = 8.dp)
+                )
+            }
+            Box(
+                modifier = Modifier
+                    .size(44.dp)
+                    .clip(CircleShape)
+                    .clickable(onClick = onClose),
+                contentAlignment = Alignment.Center
+            ) { Text("✓", color = CMCyan, fontSize = 22.sp, fontWeight = FontWeight.Bold) }
+        }
+        Column(
+            modifier = Modifier
+                .padding(horizontal = 12.dp)
+                .padding(bottom = 12.dp),
+            content = content
+        )
     }
 }
 
@@ -2301,7 +2866,7 @@ private fun TransitionFrame(
                     filter
                 )
             }
-            else -> { // Crossfade
+            else -> {
                 FrameImage(inc, Modifier, filter)
                 FrameImage(out, Modifier.graphicsLayer { alpha = 1f - p }, filter)
             }
@@ -2342,7 +2907,6 @@ private fun PreviewArea(
     val nextBmp = next?.thumb
     val inImg = remember(nextBmp) { nextBmp?.asImageBitmap() }
 
-    // Transition progress (0..1) during the last part of a clip, or -1 when none
     val tMs = minOf(ed.transitionMs, (cur?.lengthMs ?: 0L) / 2)
     val remaining = (cur?.lengthMs ?: 0L) - (loc?.second ?: 0L)
     val p = if (
@@ -2353,10 +2917,14 @@ private fun PreviewArea(
     val active = ed.overlays.filter {
         ed.positionMs >= it.startMs && ed.positionMs < it.startMs + it.lengthMs
     }
-    val filter = effectFilter(active.firstOrNull { it.kind == KIND_EFFECT }?.label ?: ed.globalEffect)
+    val filter = effectFilter(
+        active.firstOrNull { it.kind == KIND_EFFECT }?.label ?: cur?.filter ?: ed.globalEffect
+    )
 
     Box(
-        modifier = modifier.background(Color.Black),
+        modifier = modifier
+            .clipToBounds()
+            .background(Color.Black),
         contentAlignment = Alignment.Center
     ) {
         if (outImg != null && inImg != null && cur != null && p >= 0f) {
@@ -2365,15 +2933,15 @@ private fun PreviewArea(
             FrameImage(outImg, Modifier, filter)
         } else if (ed.clips.isEmpty()) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Text("Your project preview", color = CMText, fontWeight = FontWeight.SemiBold)
-                Spacer(Modifier.height(10.dp))
+                Text("Your project preview", color = CMText, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                Spacer(Modifier.height(8.dp))
                 Button(
                     onClick = onAddMedia,
                     colors = ButtonDefaults.buttonColors(
                         containerColor = CMTeal,
                         contentColor = CMBackground
                     )
-                ) { Text("+ Add photos or videos") }
+                ) { Text("+ Add media", fontSize = 12.sp) }
             }
         } else {
             Text("Loading…", color = CMMuted)
@@ -2382,13 +2950,13 @@ private fun PreviewArea(
         Column(
             modifier = Modifier
                 .align(Alignment.BottomStart)
-                .padding(start = 24.dp, bottom = 20.dp)
+                .padding(start = 14.dp, bottom = 40.dp)
         ) {
             active.filter { it.kind == KIND_TEXT }.forEach { o ->
                 Text(
                     o.label,
                     color = Color.White,
-                    fontSize = 30.sp,
+                    fontSize = 26.sp,
                     fontFamily = FontFamily.Cursive,
                     fontStyle = FontStyle.Italic,
                     style = TextStyle(shadow = Shadow(Color(0x99000000), blurRadius = 8f))
@@ -2396,57 +2964,33 @@ private fun PreviewArea(
             }
         }
 
+        Column(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(horizontal = 12.dp, vertical = 12.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            active.filter { it.kind == KIND_CAPTION }.forEach { o ->
+                Text(
+                    o.label,
+                    color = Color.White,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier
+                        .padding(top = 2.dp)
+                        .background(Color(0x99000000), RoundedCornerShape(6.dp))
+                        .padding(horizontal = 8.dp, vertical = 3.dp)
+                )
+            }
+        }
+
         Row(
             modifier = Modifier
                 .align(Alignment.TopEnd)
-                .padding(14.dp)
+                .padding(10.dp)
         ) {
             active.filter { it.kind == KIND_STICKER }.forEach { o ->
-                Text(o.label, fontSize = 38.sp)
-            }
-        }
-    }
-}
-
-@Composable
-private fun PlayerControls(ed: EditorState, notify: (String) -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 6.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Box(Modifier.weight(1f)) {
-            Text(
-                text = buildAnnotatedString {
-                    withStyle(SpanStyle(color = CMText, fontSize = 16.sp)) {
-                        append(fmt(ed.positionMs))
-                    }
-                    withStyle(SpanStyle(color = CMMuted, fontSize = 15.sp)) {
-                        append("  /  ${fmt(ed.totalMs)}")
-                    }
-                }
-            )
-        }
-
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            IconTap(onClick = { ed.jumpPrev() }) { PlayerIcon("prev", Color.White, 22.dp) }
-            Spacer(Modifier.width(14.dp))
-            IconTap(
-                onClick = {
-                    if (ed.totalMs <= 0L) notify("Add photos or videos first")
-                    else ed.playing = !ed.playing
-                }
-            ) {
-                PlayerIcon(if (ed.playing) "pause" else "play", Color.White, 32.dp)
-            }
-            Spacer(Modifier.width(14.dp))
-            IconTap(onClick = { ed.jumpNext() }) { PlayerIcon("next", Color.White, 22.dp) }
-        }
-
-        Box(Modifier.weight(1f), contentAlignment = Alignment.CenterEnd) {
-            IconTap(onClick = { ed.fullscreen = !ed.fullscreen }) {
-                PlayerIcon("full", Color.White, 22.dp)
+                Text(o.label, fontSize = 32.sp)
             }
         }
     }
@@ -2506,6 +3050,21 @@ private fun PlayerIcon(kind: String, color: Color = Color.White, iconSize: Dp = 
                     color
                 )
             }
+            "close" -> {
+                val sw = 2.5.dp.toPx()
+                drawLine(color, Offset(w * 0.15f, h * 0.15f), Offset(w * 0.85f, h * 0.85f), sw)
+                drawLine(color, Offset(w * 0.85f, h * 0.15f), Offset(w * 0.15f, h * 0.85f), sw)
+            }
+            "search" -> {
+                val sw = 2.5.dp.toPx()
+                drawCircle(
+                    color,
+                    radius = w * 0.32f,
+                    center = Offset(w * 0.42f, h * 0.42f),
+                    style = androidx.compose.ui.graphics.drawscope.Stroke(sw)
+                )
+                drawLine(color, Offset(w * 0.66f, h * 0.66f), Offset(w * 0.92f, h * 0.92f), sw)
+            }
             "full" -> {
                 val a = w * 0.12f
                 val b = w * 0.88f
@@ -2542,151 +3101,265 @@ private fun DrawScope.drawBeats(beats: List<Long>, color: Color) {
 }
 
 @Composable
+private fun TrimHandle(modifier: Modifier, onStart: () -> Unit, onDrag: (Float) -> Unit) {
+    val startNow by rememberUpdatedState(onStart)
+    val dragNow by rememberUpdatedState(onDrag)
+    Box(
+        modifier = modifier
+            .width(14.dp)
+            .fillMaxHeight()
+            .background(Color.White, RoundedCornerShape(5.dp))
+            .pointerInput(Unit) {
+                detectHorizontalDragGestures(onDragStart = { startNow() }) { change, dx ->
+                    change.consume()
+                    dragNow(dx)
+                }
+            },
+        contentAlignment = Alignment.Center
+    ) {
+        Box(
+            Modifier
+                .width(2.dp)
+                .height(16.dp)
+                .background(Color(0xFF8A8A8A))
+        )
+    }
+}
+
+@Composable
 private fun TimelineArea(
     ed: EditorState,
     onAddMedia: () -> Unit,
-    onAddAudio: () -> Unit
+    onAddAudio: () -> Unit,
+    onCover: () -> Unit,
+    onMuteAll: () -> Unit,
+    onTextTap: () -> Unit
 ) {
     val density = LocalDensity.current
     val pxPerMs = with(density) { DP_PER_SEC.toPx() } / 1000f
-    val total = ed.totalMs
-    val overlayEnd = ed.overlays.maxOfOrNull { it.startMs + it.lengthMs } ?: 0L
-    val contentMs = maxOf(total, overlayEnd)
-    val contentWidthPx =
-        (contentMs * pxPerMs + with(density) { 96.dp.toPx() }).roundToInt().coerceAtLeast(1)
 
-    Row(
+    val hasSticker = ed.overlays.any { it.kind == KIND_STICKER }
+    val hasCaption = ed.overlays.any { it.kind == KIND_CAPTION }
+    val hasEffect = ed.overlays.any { it.kind == KIND_EFFECT } || ed.globalEffect != null
+    val extra = (if (hasSticker) 1 else 0) + (if (hasCaption) 1 else 0) + (if (hasEffect) 1 else 0)
+
+    BoxWithConstraints(
         modifier = Modifier
             .fillMaxWidth()
-            .height(232.dp)
+            .height(172.dp + 40.dp * extra)
+            .background(CMBackground)
+            .clipToBounds()
+            .pointerInput(pxPerMs) {
+                detectHorizontalDragGestures(
+                    onDragStart = { ed.playing = false }
+                ) { change, dragAmount ->
+                    change.consume()
+                    ed.seekTo(ed.positionMs - (dragAmount / pxPerMs).toLong())
+                }
+            }
     ) {
-        Column(modifier = Modifier.width(48.dp)) {
-            Spacer(Modifier.height(28.dp))
-            TrackIcon("▣", 60.dp) { onAddMedia() }
-            Spacer(Modifier.height(4.dp))
-            TrackIcon("♫", 32.dp) { onAddAudio() }
-            Spacer(Modifier.height(4.dp))
-            TrackIcon("☺", 32.dp) { ed.tool = "Stickers" }
-            Spacer(Modifier.height(4.dp))
-            TrackIcon("T", 32.dp) { ed.tool = "Text" }
-            Spacer(Modifier.height(4.dp))
-            TrackIcon("◈", 32.dp) { ed.tool = "Effects" }
-        }
+        val half = maxWidth / 2
+        val halfPx = with(density) { half.toPx() }
+        val total = ed.totalMs
+        val overlayEnd = ed.overlays.maxOfOrNull { it.startMs + it.lengthMs } ?: 0L
+        val contentMs = maxOf(total, overlayEnd)
+        val contentWidthPx = (halfPx + contentMs * pxPerMs + with(density) { 120.dp.toPx() })
+            .roundToInt()
+            .coerceAtLeast(1)
 
         Box(
             modifier = Modifier
-                .weight(1f)
-                .fillMaxHeight()
-                .clipToBounds()
-                .pointerInput(pxPerMs) {
-                    detectHorizontalDragGestures(
-                        onDragStart = { ed.playing = false }
-                    ) { change, dragAmount ->
-                        change.consume()
-                        ed.seekTo(ed.positionMs - (dragAmount / pxPerMs).toLong())
+                .fillMaxSize()
+                .layout { measurable, constraints ->
+                    val p = measurable.measure(
+                        Constraints.fixed(contentWidthPx, constraints.maxHeight)
+                    )
+                    layout(constraints.maxWidth, constraints.maxHeight) {
+                        p.place((-ed.positionMs * pxPerMs).roundToInt(), 0)
                     }
                 }
         ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .layout { measurable, constraints ->
-                        val p = measurable.measure(
-                            Constraints.fixed(contentWidthPx, constraints.maxHeight)
-                        )
-                        layout(constraints.maxWidth, constraints.maxHeight) {
-                            val ox = (constraints.maxWidth / 2f - ed.positionMs * pxPerMs)
-                                .roundToInt()
-                            p.place(ox, 0)
+            Column(Modifier.fillMaxSize()) {
+                Spacer(Modifier.height(2.dp))
+                Row(Modifier.height(26.dp)) {
+                    Spacer(Modifier.width(half))
+                    Ruler(total, Modifier.weight(1f))
+                }
+                Spacer(Modifier.height(6.dp))
+
+                Row(Modifier.height(58.dp)) {
+                    Row(
+                        modifier = Modifier
+                            .width(half)
+                            .fillMaxHeight()
+                            .padding(end = 8.dp),
+                        horizontalArrangement = Arrangement.End,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        val allMuted = ed.clips.isNotEmpty() && ed.clips.all { it.muted }
+                        Column(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable(onClick = onMuteAll)
+                                .padding(horizontal = 8.dp, vertical = 4.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text(if (allMuted) "🔇" else "🔊", fontSize = 18.sp)
+                            Text(
+                                if (allMuted) "Unmute" else "Mute clip",
+                                color = CMMuted,
+                                fontSize = 10.sp,
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                        }
+                        Spacer(Modifier.width(6.dp))
+                        Box(
+                            modifier = Modifier
+                                .width(64.dp)
+                                .fillMaxHeight()
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(CMSurface2)
+                                .clickable(onClick = onCover),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            ed.clips.firstOrNull()?.thumb?.let { b ->
+                                val img = remember(b) { b.asImageBitmap() }
+                                Image(
+                                    bitmap = img,
+                                    contentDescription = null,
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .alpha(0.55f),
+                                    contentScale = ContentScale.Crop
+                                )
+                            }
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text("✎", color = Color.White, fontSize = 16.sp)
+                                Text("Cover", color = Color.White, fontSize = 11.sp)
+                            }
                         }
                     }
-            ) {
-                Column(Modifier.fillMaxSize()) {
-                    Ruler(total)
+                    VideoLane(ed, pxPerMs, onAddMedia)
+                }
+                Spacer(Modifier.height(6.dp))
+
+                Row(Modifier.height(36.dp)) {
+                    LaneTile("♫", half, onAddAudio)
+                    MusicLane(ed, Modifier.weight(1f), onAddAudio)
+                }
+                Spacer(Modifier.height(6.dp))
+
+                Row(Modifier.height(36.dp)) {
+                    LaneTile("T", half, onTextTap)
+                    OverlayLane(ed, KIND_TEXT, Color(0xFF138A9C), "T  ", "Add text", pxPerMs, Modifier.weight(1f), onTextTap)
+                }
+
+                if (hasSticker) {
                     Spacer(Modifier.height(4.dp))
-                    VideoLane(ed, onAddMedia)
+                    Row(Modifier.height(36.dp)) {
+                        LaneTile("☺", half) { ed.panel = "stickers" }
+                        OverlayLane(ed, KIND_STICKER, CMPurple, "", null, pxPerMs, Modifier.weight(1f)) { }
+                    }
+                }
+                if (hasCaption) {
                     Spacer(Modifier.height(4.dp))
-                    MusicLane(ed, onAddAudio)
+                    Row(Modifier.height(36.dp)) {
+                        LaneTile("▤", half) { ed.panel = "captions" }
+                        OverlayLane(ed, KIND_CAPTION, Color(0xFF7A4FD1), "▤  ", null, pxPerMs, Modifier.weight(1f)) { }
+                    }
+                }
+                if (hasEffect) {
                     Spacer(Modifier.height(4.dp))
-                    OverlayLane(ed, KIND_STICKER, CMPurple, "")
-                    Spacer(Modifier.height(4.dp))
-                    OverlayLane(ed, KIND_TEXT, Color(0xFF138A9C), "T  ")
-                    Spacer(Modifier.height(4.dp))
-                    OverlayLane(ed, KIND_EFFECT, Color(0xFF4A3AA8), "✦  ")
+                    Row(Modifier.height(36.dp)) {
+                        LaneTile("✦", half) { ed.panel = "effects" }
+                        OverlayLane(ed, KIND_EFFECT, Color(0xFF4A3AA8), "✦  ", null, pxPerMs, Modifier.weight(1f)) { }
+                    }
                 }
             }
-
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .width(2.dp)
-                    .fillMaxHeight()
-                    .background(Color.White)
-            )
         }
+
+        // Playhead
+        Box(
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .offset(x = half - 1.dp)
+                .width(2.dp)
+                .fillMaxHeight()
+                .background(Color.White)
+        )
+
+        // Time readout
+        Text(
+            text = buildAnnotatedString {
+                withStyle(SpanStyle(color = CMText, fontSize = 14.sp)) { append(fmt(ed.positionMs)) }
+                withStyle(SpanStyle(color = CMMuted, fontSize = 13.sp)) { append(" / ${fmt(ed.totalMs)}") }
+            },
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .padding(start = 16.dp, top = 4.dp)
+        )
     }
 }
 
 @Composable
-private fun TrackIcon(glyph: String, height: Dp, onClick: () -> Unit) {
+private fun LaneTile(glyph: String, width: Dp, onClick: () -> Unit) {
     Box(
         modifier = Modifier
-            .padding(start = 6.dp, end = 4.dp)
-            .fillMaxWidth()
-            .height(height)
-            .clip(RoundedCornerShape(10.dp))
-            .background(CMSurface)
-            .clickable(onClick = onClick),
-        contentAlignment = Alignment.Center
+            .width(width)
+            .fillMaxHeight()
+            .padding(end = 8.dp),
+        contentAlignment = Alignment.CenterEnd
     ) {
-        Text(glyph, color = CMText, fontSize = if (height > 40.dp) 20.sp else 16.sp)
+        Box(
+            modifier = Modifier
+                .width(44.dp)
+                .fillMaxHeight()
+                .clip(RoundedCornerShape(8.dp))
+                .background(CMLane)
+                .clickable(onClick = onClick),
+            contentAlignment = Alignment.Center
+        ) { Text(glyph, color = CMMuted, fontSize = 18.sp) }
     }
 }
 
 @Composable
-private fun Ruler(totalMs: Long) {
+private fun Ruler(totalMs: Long, modifier: Modifier) {
     val secs = (totalMs / 1000L).toInt() + 4
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(24.dp)
-    ) {
+    Box(modifier = modifier.fillMaxHeight()) {
         Canvas(Modifier.fillMaxSize()) {
             for (s in 0..secs) {
-                val x = s * DP_PER_SEC.toPx()
-                val tick = if (s % 5 == 0) 10.dp.toPx() else 5.dp.toPx()
-                drawLine(
-                    CMMuted.copy(alpha = 0.6f),
-                    Offset(x, size.height - tick),
-                    Offset(x, size.height),
-                    1.dp.toPx()
+                drawCircle(
+                    CMMuted.copy(alpha = 0.7f),
+                    radius = 1.5.dp.toPx(),
+                    center = Offset(s * DP_PER_SEC.toPx(), size.height * 0.72f)
                 )
             }
         }
-        for (s in 0..secs step 5) {
+        for (s in 0..secs step 2) {
             Text(
                 fmt(s * 1000L),
                 color = CMMuted,
                 fontSize = 10.sp,
-                modifier = Modifier.offset(x = DP_PER_SEC * s.toFloat() + 3.dp, y = 0.dp)
+                modifier = Modifier.offset(x = DP_PER_SEC * s.toFloat() - 14.dp, y = 0.dp)
             )
         }
     }
 }
 
 @Composable
-private fun VideoLane(ed: EditorState, onAddMedia: () -> Unit) {
+private fun VideoLane(ed: EditorState, pxPerMs: Float, onAddMedia: () -> Unit) {
     val shape = RoundedCornerShape(8.dp)
-    Row(modifier = Modifier.height(60.dp)) {
+    Row(modifier = Modifier.fillMaxHeight()) {
         ed.clips.forEachIndexed { index, c ->
             val selected = ed.selKind == SEL_CLIP && ed.selId == c.uid
+            val widthDp = DP_PER_SEC * (c.lengthMs / 1000f)
             Box(
                 modifier = Modifier
-                    .width(DP_PER_SEC * (c.lengthMs / 1000f))
+                    .width(widthDp)
                     .fillMaxHeight()
                     .clip(shape)
                     .background(CMSurface2)
-                    .then(if (selected) Modifier.border(2.dp, CMTeal, shape) else Modifier)
                     .clickable {
                         ed.selKind = SEL_CLIP
                         ed.selId = c.uid
@@ -2694,11 +3367,28 @@ private fun VideoLane(ed: EditorState, onAddMedia: () -> Unit) {
             ) {
                 c.thumb?.let { b ->
                     val img = remember(b) { b.asImageBitmap() }
-                    Image(
-                        bitmap = img,
-                        contentDescription = null,
-                        modifier = Modifier.fillMaxSize(),
-                        contentScale = ContentScale.Crop
+                    val n = (widthDp.value / 56f).toInt().coerceIn(1, 40) + 1
+                    Row(Modifier.fillMaxSize()) {
+                        repeat(n) {
+                            Image(
+                                bitmap = img,
+                                contentDescription = null,
+                                modifier = Modifier
+                                    .width(56.dp)
+                                    .fillMaxHeight(),
+                                contentScale = ContentScale.Crop
+                            )
+                        }
+                    }
+                }
+
+                if (c.muted) {
+                    Text(
+                        "🔇",
+                        fontSize = 11.sp,
+                        modifier = Modifier
+                            .align(Alignment.TopStart)
+                            .padding(4.dp)
                     )
                 }
 
@@ -2708,18 +3398,15 @@ private fun VideoLane(ed: EditorState, onAddMedia: () -> Unit) {
                     fontSize = 9.sp,
                     modifier = Modifier
                         .align(Alignment.BottomStart)
-                        .padding(4.dp)
+                        .padding(start = if (selected) 18.dp else 4.dp, bottom = 4.dp)
                         .background(Color(0x88000000), RoundedCornerShape(4.dp))
                         .padding(horizontal = 4.dp)
                 )
 
                 if (index < ed.clips.lastIndex) {
                     val has = c.transition != "None"
-
-                    // Transition zone at the end of the clip
                     if (has) {
-                        val zone = DP_PER_SEC *
-                            (minOf(ed.transitionMs, c.lengthMs / 2) / 1000f)
+                        val zone = DP_PER_SEC * (minOf(ed.transitionMs, c.lengthMs / 2) / 1000f)
                         Box(
                             modifier = Modifier
                                 .align(Alignment.CenterEnd)
@@ -2732,595 +3419,43 @@ private fun VideoLane(ed: EditorState, onAddMedia: () -> Unit) {
                                 )
                         )
                     }
-
-                    val ms = RoundedCornerShape(7.dp)
+                    val ms = RoundedCornerShape(6.dp)
                     Box(
                         modifier = Modifier
                             .align(Alignment.CenterEnd)
-                            .padding(end = 2.dp)
-                            .size(24.dp)
+                            .padding(end = if (selected) 18.dp else 3.dp)
+                            .size(22.dp)
                             .clip(ms)
-                            .background(if (has) CMPurple else Color(0xCC1A2540))
-                            .border(1.dp, CMTeal.copy(alpha = if (has) 1f else 0.4f), ms)
+                            .background(if (has) CMPurple else Color(0xE6FFFFFF))
                             .clickable {
                                 ed.selKind = SEL_CLIP
                                 ed.selId = c.uid
-                                ed.tool = "Transition"
+                                ed.panel = "transition"
                             },
                         contentAlignment = Alignment.Center
                     ) {
-                        Text("⋈", color = Color.White, fontSize = 13.sp)
+                        Text("⋈", color = if (has) Color.White else Color(0xFF222222), fontSize = 13.sp)
                     }
                 }
-            }
-            Spacer(Modifier.width(1.dp))
-        }
 
-        Box(
-            modifier = Modifier
-                .width(56.dp)
-                .fillMaxHeight()
-                .clip(shape)
-                .background(CMSurface)
-                .clickable(onClick = onAddMedia),
-            contentAlignment = Alignment.Center
-        ) {
-            Text("+", color = CMTeal, fontSize = 26.sp)
-        }
-    }
-}
-
-@Composable
-private fun MusicLane(ed: EditorState, onAddAudio: () -> Unit) {
-    val shape = RoundedCornerShape(8.dp)
-    val uri = ed.musicUri
-
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(32.dp)
-            .clip(shape)
-            .background(Color(0x14FFFFFF))
-    ) {
-        if (uri == null) {
-            Canvas(Modifier.fillMaxSize()) { drawBeats(ed.beats, CMTeal) }
-            Text(
-                "Tap ♫ to add music",
-                color = CMMuted,
-                fontSize = 11.sp,
-                modifier = Modifier
-                    .align(Alignment.CenterStart)
-                    .clickable(onClick = onAddAudio)
-                    .padding(start = 10.dp, end = 10.dp)
-            )
-        } else {
-            val selected = ed.selKind == SEL_MUSIC
-            val seed = uri.hashCode() and 0xFF
-            val name = uri.lastPathSegment?.substringAfterLast('/') ?: "Audio"
-
-            Box(
-                modifier = Modifier
-                    .width(DP_PER_SEC * (ed.totalMs / 1000f).coerceAtLeast(2f))
-                    .fillMaxHeight()
-                    .clip(shape)
-                    .background(Color(0xFF4B34D8))
-                    .then(if (selected) Modifier.border(2.dp, CMTeal, shape) else Modifier)
-                    .clickable {
-                        ed.selKind = SEL_MUSIC
-                        ed.selId = -1L
-                    }
-            ) {
-                Canvas(Modifier.fillMaxSize()) {
-                    val step = 5.dp.toPx()
-                    var x = 0f
-                    var i = 0
-                    while (x < size.width) {
-                        val h = (0.25f + 0.75f * (((i * 53 + seed) % 17) / 17f)) * size.height * 0.7f
-                        drawLine(
-                            Color(0x88FFFFFF),
-                            Offset(x, (size.height - h) / 2f),
-                            Offset(x, (size.height + h) / 2f),
-                            2.dp.toPx()
-                        )
-                        x += step
-                        i++
-                    }
-                    drawBeats(ed.beats, Color(0xFFFFE08A))
-                }
-                Text(
-                    "♫  $name",
-                    color = Color.White,
-                    fontSize = 11.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier
-                        .align(Alignment.CenterStart)
-                        .padding(horizontal = 8.dp)
-                        .widthIn(max = 150.dp)
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun OverlayLane(ed: EditorState, kind: Int, color: Color, prefix: String) {
-    val shape = RoundedCornerShape(8.dp)
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(32.dp)
-            .clip(shape)
-            .background(Color(0x14FFFFFF))
-    ) {
-        if (kind == KIND_EFFECT && ed.globalEffect != null) {
-            val selected = ed.selKind == SEL_OVERLAY && ed.selId == GLOBAL_EFFECT_ID
-            Box(
-                modifier = Modifier
-                    .width(DP_PER_SEC * (ed.totalMs / 1000f).coerceAtLeast(2f))
-                    .fillMaxHeight()
-                    .clip(shape)
-                    .background(color.copy(alpha = 0.55f))
-                    .then(if (selected) Modifier.border(2.dp, CMTeal, shape) else Modifier)
-                    .clickable {
-                        ed.selKind = SEL_OVERLAY
-                        ed.selId = GLOBAL_EFFECT_ID
-                    },
-                contentAlignment = Alignment.CenterStart
-            ) {
-                Text(
-                    "✦  ${ed.globalEffect} (whole video)",
-                    color = Color.White,
-                    fontSize = 12.sp,
-                    maxLines = 1,
-                    modifier = Modifier.padding(horizontal = 8.dp)
-                )
-            }
-        }
-
-        ed.overlays.filter { it.kind == kind }.forEach { o ->
-            val selected = ed.selKind == SEL_OVERLAY && ed.selId == o.uid
-            Box(
-                modifier = Modifier
-                    .offset(x = DP_PER_SEC * (o.startMs / 1000f))
-                    .width((DP_PER_SEC * (o.lengthMs / 1000f)).coerceAtLeast(44.dp))
-                    .fillMaxHeight()
-                    .clip(shape)
-                    .background(color)
-                    .then(if (selected) Modifier.border(2.dp, CMTeal, shape) else Modifier)
-                    .clickable {
-                        ed.selKind = SEL_OVERLAY
-                        ed.selId = o.uid
-                    },
-                contentAlignment = Alignment.CenterStart
-            ) {
-                Text(
-                    prefix + o.label,
-                    color = Color.White,
-                    fontSize = 12.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.padding(horizontal = 8.dp)
-                )
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Tools
-// ---------------------------------------------------------------------------
-@Composable
-private fun ToolsPanel(ed: EditorState, notify: (String) -> Unit, onDetectBeats: () -> Unit) {
-    val tools = listOf(
-        "Trim" to "✂",
-        "Split" to "◧",
-        "Speed" to "◔",
-        "Transition" to "⋈",
-        "Beat" to "♪",
-        "Effects" to "✦",
-        "Stickers" to "☺",
-        "Text" to "T"
-    )
-
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(CMPanel, RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp))
-            .padding(top = 6.dp)
-    ) {
-        if (ed.selKind != SEL_NONE) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 4.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    "Selected: ${ed.selectionLabel()}",
-                    color = CMMuted,
-                    fontSize = 12.sp,
-                    modifier = Modifier.weight(1f),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Text(
-                    "Delete",
-                    color = CMAmber,
-                    fontWeight = FontWeight.SemiBold,
-                    fontSize = 13.sp,
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
-                        .clickable { notify(ed.deleteSelected()) }
-                        .padding(horizontal = 10.dp, vertical = 4.dp)
-                )
-            }
-        }
-
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .horizontalScroll(rememberScrollState())
-        ) {
-            tools.forEach { (name, glyph) ->
-                val sel = ed.tool == name
-                Column(
-                    modifier = Modifier
-                        .width(66.dp)
-                        .clickable {
-                            if (name == "Split") notify(ed.split()) else ed.tool = name
-                        }
-                        .padding(vertical = 8.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    Text(glyph, color = if (sel) CMTeal else CMText, fontSize = 22.sp)
-                    Spacer(Modifier.height(2.dp))
-                    Text(
-                        name,
-                        color = if (sel) CMTeal else CMMuted,
-                        fontSize = 10.sp,
-                        maxLines = 1,
-                        softWrap = false
+                if (selected) {
+                    Box(
+                        Modifier
+                            .fillMaxSize()
+                            .border(2.dp, Color.White, shape)
                     )
-                }
-            }
-        }
-
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .height(1.dp)
-                .background(Color(0x14FFFFFF))
-        )
-
-        Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
-            when (ed.tool) {
-                "Trim" -> TrimPanel(ed)
-                "Speed" -> SpeedPanel(ed, notify)
-                "Transition" -> TransitionPanel(ed, notify)
-                "Beat" -> BeatPanel(ed, notify, onDetectBeats)
-                "Effects" -> EffectsPanel(ed, notify)
-                "Stickers" -> StickersPanel(ed)
-                "Text" -> TextPanel(ed, notify)
-                else -> Hint("Pick a tool above.")
-            }
-        }
-    }
-}
-
-@Composable
-private fun Hint(text: String) {
-    Text(text, color = CMMuted, fontSize = 12.sp, modifier = Modifier.padding(vertical = 8.dp))
-}
-
-@Composable
-private fun ToolChip(text: String, selected: Boolean, onClick: () -> Unit) {
-    val shape = RoundedCornerShape(12.dp)
-    Box(
-        modifier = Modifier
-            .clip(shape)
-            .background(if (selected) CMPurple else CMSurface2)
-            .then(if (selected) Modifier.border(1.5.dp, CMTeal, shape) else Modifier)
-            .clickable(onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 10.dp),
-        contentAlignment = Alignment.Center
-    ) {
-        Text(text, color = if (selected) Color.White else CMText, fontSize = 13.sp)
-    }
-}
-
-@Composable
-private fun LabeledSlider(
-    label: String,
-    value: Float,
-    range: ClosedFloatingPointRange<Float>,
-    onChange: (Float) -> Unit
-) {
-    Column {
-        Text(label, color = CMText, fontSize = 12.sp)
-        Slider(
-            value = value,
-            onValueChange = onChange,
-            valueRange = range,
-            colors = SliderDefaults.colors(
-                thumbColor = CMTeal,
-                activeTrackColor = CMTeal,
-                inactiveTrackColor = CMSurface2
-            )
-        )
-    }
-}
-
-@Composable
-private fun TrimPanel(ed: EditorState) {
-    val c = ed.targetClip()
-    when {
-        c == null -> Hint("Add media to trim it.")
-
-        c.clip.isImage -> {
-            val sec = ((c.endMs - c.startMs) / 1000f).coerceIn(1f, 15f)
-            LabeledSlider("Photo duration  ${"%.1f".format(sec)}s", sec, 1f..15f) { v ->
-                c.endMs = c.startMs + (v * 1000f).toLong()
-                ed.seekTo(ed.positionMs)
-            }
-        }
-
-        c.sourceMs < 1000L -> Hint("Video is still loading or too short to trim.")
-
-        else -> {
-            val maxStart = (c.endMs - 500L).coerceAtLeast(1L).toFloat()
-            LabeledSlider(
-                "Start  ${fmt1(c.startMs)}",
-                c.startMs.toFloat().coerceIn(0f, maxStart),
-                0f..maxStart
-            ) { v ->
-                c.startMs = v.toLong()
-                ed.seekTo(ed.positionMs)
-            }
-
-            val minEnd = (c.startMs + 500L).toFloat()
-            val maxEnd = c.sourceMs.toFloat().coerceAtLeast(minEnd + 1f)
-            LabeledSlider(
-                "End  ${fmt1(c.endMs)}",
-                c.endMs.toFloat().coerceIn(minEnd, maxEnd),
-                minEnd..maxEnd
-            ) { v ->
-                c.endMs = v.toLong()
-                ed.seekTo(ed.positionMs)
-            }
-        }
-    }
-}
-
-@Composable
-private fun SpeedPanel(ed: EditorState, notify: (String) -> Unit) {
-    val c = ed.targetClip()
-    Row(
-        modifier = Modifier.horizontalScroll(rememberScrollState()),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        listOf(0.5f, 1f, 1.5f, 2f).forEach { s ->
-            val label = if (s % 1f == 0f) "${s.toInt()}x" else "${s}x"
-            ToolChip(label, c?.speed == s) {
-                when {
-                    c == null -> notify("Add media first")
-                    c.clip.isImage -> notify("Speed applies to videos")
-                    else -> {
-                        c.speed = s
+                    TrimHandle(
+                        Modifier.align(Alignment.CenterStart),
+                        onStart = { ed.commit() }
+                    ) { dx ->
+                        val ms = dx / pxPerMs
+                        if (c.clip.isImage) {
+                            val len = ((c.endMs - c.startMs) - ms).coerceAtLeast(1000f)
+                            c.endMs = c.startMs + len.toLong()
+                        } else {
+                            val s = (c.startMs + ms * c.speed).coerceIn(0f, (c.endMs - 500L).toFloat())
+                            c.startMs = s.toLong()
+                        }
                         ed.seekTo(ed.positionMs)
                     }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun TransitionPanel(ed: EditorState, notify: (String) -> Unit) {
-    val c = ed.targetClip()
-    val items = listOf(
-        "None" to "⊘",
-        "Crossfade" to "◐",
-        "Slide" to "→",
-        "Zoom" to "◎",
-        "Fade" to "◌",
-        "Dissolve" to "∷",
-        "Whip Pan" to "⇒"
-    )
-
-    Text(
-        "Applies to the end of the selected clip",
-        color = CMMuted,
-        fontSize = 11.sp,
-        modifier = Modifier.padding(bottom = 8.dp)
-    )
-
-    Row(
-        modifier = Modifier.horizontalScroll(rememberScrollState()),
-        horizontalArrangement = Arrangement.spacedBy(10.dp)
-    ) {
-        items.forEach { (name, glyph) ->
-            val selected = c?.transition == name
-            val shape = RoundedCornerShape(12.dp)
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                modifier = Modifier.clickable {
-                    if (c == null) {
-                        notify("Add media first")
-                    } else if (ed.clips.lastOrNull()?.uid == c.uid) {
-                        notify("Transitions go between clips. Select a clip that has one after it.")
-                    } else {
-                        c.transition = name
-                        notify(if (name == "None") "Transition removed" else "$name applied")
-                    }
-                }
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(width = 66.dp, height = 54.dp)
-                        .clip(shape)
-                        .background(Brush.linearGradient(listOf(Color(0xFF2B3A6B), CMPurple)))
-                        .then(if (selected) Modifier.border(2.dp, CMTeal, shape) else Modifier),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(glyph, color = Color.White, fontSize = 22.sp)
-                }
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    name,
-                    color = if (selected) CMTeal else CMMuted,
-                    fontSize = 11.sp,
-                    maxLines = 1
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun BeatPanel(ed: EditorState, notify: (String) -> Unit, onDetect: () -> Unit) {
-    val status = when {
-        ed.beatStatus.isNotBlank() -> ed.beatStatus
-        ed.beats.isEmpty() -> "No beats yet. Add music, then tap Detect beats."
-        ed.beatBpm > 0f -> "${ed.beatBpm.roundToInt()} BPM · ${ed.beats.size} beats"
-        else -> "${ed.beats.size} beat markers"
-    }
-
-    Text(status, color = CMTeal, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-    Spacer(Modifier.height(8.dp))
-
-    Row(
-        modifier = Modifier.horizontalScroll(rememberScrollState()),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        ToolChip("Detect beats", false) { onDetect() }
-        ToolChip("+ Marker", false) {
-            ed.addBeat(ed.positionMs)
-            notify("Beat marker added")
-        }
-        ToolChip("Clear", false) {
-            ed.beats.clear()
-            ed.beatBpm = 0f
-            ed.beatStatus = ""
-        }
-    }
-
-    Spacer(Modifier.height(12.dp))
-    Text("Sync cuts to the beat", color = CMMuted, fontSize = 12.sp)
-    Spacer(Modifier.height(6.dp))
-
-    Row(
-        modifier = Modifier.horizontalScroll(rememberScrollState()),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        listOf(1 to "Every beat", 2 to "Every 2 beats", 4 to "Every 4 beats").forEach { (n, label) ->
-            ToolChip(label, false) { notify(ed.syncToBeats(n)) }
-        }
-    }
-}
-
-@Composable
-private fun EffectsPanel(ed: EditorState, notify: (String) -> Unit) {
-    val activeNow = ed.overlays.firstOrNull {
-        it.kind == KIND_EFFECT &&
-            ed.positionMs >= it.startMs &&
-            ed.positionMs < it.startMs + it.lengthMs
-    }?.label
-
-    Row(
-        modifier = Modifier.horizontalScroll(rememberScrollState()),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        listOf("None", "Warm", "Cool", "B&W", "Vivid", "Vintage").forEach { name ->
-            ToolChip(name, (activeNow ?: "None") == name) {
-                if (ed.clips.isEmpty()) {
-                    notify("Add media first")
-                } else {
-                    val p = ed.positionMs
-                    ed.overlays.removeAll {
-                        it.kind == KIND_EFFECT && p >= it.startMs && p < it.startMs + it.lengthMs
-                    }
-                    if (name != "None") {
-                        ed.overlays.add(Overlay(ed.newId(), KIND_EFFECT, name, p, 5_000L))
-                    }
-                    notify(if (name == "None") "Effect removed" else "$name added at playhead")
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun StickersPanel(ed: EditorState) {
-    Row(
-        modifier = Modifier.horizontalScroll(rememberScrollState()),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        listOf("❤️", "☀️", "⭐", "🔥", "😊", "✨", "🎉", "🌈", "🌴", "🎵").forEach { e ->
-            Box(
-                modifier = Modifier
-                    .size(48.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(CMSurface2)
-                    .clickable {
-                        val o = Overlay(ed.newId(), KIND_STICKER, e, ed.positionMs, 3_000L)
-                        ed.overlays.add(o)
-                        ed.selKind = SEL_OVERLAY
-                        ed.selId = o.uid
-                    },
-                contentAlignment = Alignment.Center
-            ) {
-                Text(e, fontSize = 24.sp)
-            }
-        }
-    }
-}
-
-@Composable
-private fun TextPanel(ed: EditorState, notify: (String) -> Unit) {
-    var value by rememberSaveable { mutableStateOf("") }
-
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        BasicTextField(
-            value = value,
-            onValueChange = { value = it.take(40) },
-            singleLine = true,
-            textStyle = TextStyle(color = CMText, fontSize = 15.sp),
-            cursorBrush = SolidColor(CMTeal),
-            modifier = Modifier.weight(1f),
-            decorationBox = { inner ->
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(CMSurface2, RoundedCornerShape(12.dp))
-                        .border(1.dp, Color(0x33FFFFFF), RoundedCornerShape(12.dp))
-                        .padding(horizontal = 14.dp, vertical = 12.dp)
-                ) {
-                    if (value.isEmpty()) Text("Type your text", color = CMMuted, fontSize = 15.sp)
-                    inner()
-                }
-            }
-        )
-
-        Spacer(Modifier.width(10.dp))
-
-        Button(
-            onClick = {
-                val t = value.trim()
-                if (t.isEmpty()) {
-                    notify("Type some text first")
-                } else {
-                    val o = Overlay(ed.newId(), KIND_TEXT, t, ed.positionMs, 4_000L)
-                    ed.overlays.add(o)
-                    ed.selKind = SEL_OVERLAY
-                    ed.selId = o.uid
-                    value = ""
-                }
-            },
-            colors = ButtonDefaults.buttonColors(
-                containerColor = CMTeal,
-                contentColor = CMBackground
-            )
-        ) { Text("Add") }
-    }
-}
+             
