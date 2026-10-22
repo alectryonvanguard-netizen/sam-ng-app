@@ -1,4 +1,4 @@
-
+ 
 package com.cinemotion.editor
 
 import androidx.compose.foundation.background
