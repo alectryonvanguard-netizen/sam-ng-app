@@ -1,7 +1,0 @@
-import androidx.compose.ui.res.painterResource
-import androidx.compose.foundation.Image
-
-Image(
-    painter = painterResource(id = R.drawable.app_logo),
-    contentDescription = "App Logo"
-)
