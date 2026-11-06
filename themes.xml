@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.Twirlly" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@drawable/splash_bg</item>
+        <item name="android:windowSplashScreenBackground">#0A0A0F</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/ic_logo_fg</item>
+        <item name="android:windowSplashScreenIconBackgroundColor">#B026FF</item>
+    </style>
+</resources>

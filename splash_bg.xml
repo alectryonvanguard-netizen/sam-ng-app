@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item>
+        <color android:color="#0A0A0F" />
+    </item>
+    <item
+        android:width="120dp"
+        android:height="120dp"
+        android:gravity="center">
+        <layer-list>
+            <item>
+                <shape android:shape="oval">
+                    <gradient
+                        android:angle="315"
+                        android:startColor="#FF2D87"
+                        android:centerColor="#B026FF"
+                        android:endColor="#3D5AFE" />
+                </shape>
+            </item>
+            <item android:drawable="@drawable/ic_logo_fg" />
+        </layer-list>
+    </item>
+</layer-list>
