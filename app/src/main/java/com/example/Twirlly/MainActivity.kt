@@ -125,6 +125,8 @@ fun TwirllyApp(vm: AppViewModel) {
     val videos by vm.videos.collectAsState()
     val settings by vm.settings.collectAsState()
     val drama by vm.drama.collectAsState()
+    val breakDue by vm.breakDue.collectAsState()
+    LaunchedEffect(Unit) { while (true) { delay(1000); vm.watchTick() } }
     var tab by remember { mutableIntStateOf(0) }
     var overlay by remember { mutableStateOf<Overlay?>(null) }
 
@@ -205,6 +207,7 @@ fun TwirllyApp(vm: AppViewModel) {
             drama?.let { d -> DramaScreen(vm, d.first, d.second) { vm.closeDrama() } }
         }
     }
+    if (breakDue) BreakScreen(settings.breakHours) { vm.endBreak() }
 }
 
 @Composable
