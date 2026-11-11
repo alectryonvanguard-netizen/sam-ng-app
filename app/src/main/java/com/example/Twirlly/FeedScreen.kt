@@ -25,6 +25,8 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.*
+import androidx.compose.ui.graphics.Brush
+import kotlinx.coroutines.launch
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -211,13 +213,24 @@ fun VideoPage(v: Video, active: Boolean, vm: AppViewModel, onUser: (Video) -> Un
     var showComments by remember { mutableStateOf(false) }
     var showShare by remember { mutableStateOf(false) }
     var progress by remember { mutableFloatStateOf(0f) }
+    var showDrama by remember { mutableStateOf(false) }
+    val isDrama = v.seriesTitle != null
+    val scope = rememberCoroutineScope()
+    var pendingLike by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
     LaunchedEffect(heart) { if (heart) { delay(700); heart = false } }
 
     Box(
         Modifier.fillMaxSize().pointerInput(v.id) {
             detectTapGestures(
-                onTap = { if (!v.isImage || isAlbum) paused = !paused },
-                onDoubleTap = { vm.doubleTapLike(v.id); heart = true }
+                onTap = {
+                    if (isDrama && pendingLike?.isActive == true) { pendingLike?.cancel(); heart = false; showDrama = true }
+                    else if (!v.isImage || isAlbum) paused = !paused
+                },
+                onDoubleTap = {
+                    heart = true
+                    if (isDrama) pendingLike = scope.launch { delay(900); vm.doubleTapLike(v.id) }
+                    else vm.doubleTapLike(v.id)
+                }
             )
         }
     ) {
@@ -263,6 +276,18 @@ fun VideoPage(v: Video, active: Boolean, vm: AppViewModel, onUser: (Video) -> Un
         }
 
         Column(Modifier.align(Alignment.BottomStart).padding(start = 12.dp, bottom = 16.dp, end = 90.dp)) {
+            if (isDrama) {
+                Row(
+                    Modifier.clip(RoundedCornerShape(50)).background(Brush.horizontalGradient(listOf(Color(0xFFFF2D87), Color(0xFF7B2FF7))))
+                        .clickable { showDrama = true }.padding(horizontal = 10.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Default.Movie, null, tint = Color.White, modifier = Modifier.size(14.dp))
+                    Spacer(Modifier.width(5.dp))
+                    Text("DRAMA - " + maxOf(1, v.episodes.size) + " episodes - triple-tap", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                }
+                Spacer(Modifier.height(6.dp))
+            }
             Text("@${v.user}", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 17.sp)
             Spacer(Modifier.height(6.dp))
             Text(v.caption, color = Color.White, maxLines = 3, overflow = TextOverflow.Ellipsis)
@@ -300,6 +325,7 @@ fun VideoPage(v: Video, active: Boolean, vm: AppViewModel, onUser: (Video) -> Un
     }
 
     if (showShare) ShareSheet(v, vm) { showShare = false }
+    if (showDrama) DramaPlayer(v, settings.muted) { showDrama = false }
     if (showComments) {
         ModalBottomSheet(onDismissRequest = { showComments = false }, containerColor = Color(0xFF1A1A1A)) {
             CommentsSheet(v, vm)
