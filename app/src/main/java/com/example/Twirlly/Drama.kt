@@ -48,6 +48,7 @@ fun DramaScreen(vm: AppViewModel, seriesId: Long, startEp: Int, onBack: () -> Un
     val all by vm.videos.collectAsState()
     val settings by vm.settings.collectAsState()
     val profile by vm.profile.collectAsState()
+    val breakOn by vm.breakDue.collectAsState()
     val eps = all.filter { it.seriesId == seriesId }.sortedBy { it.episodeNo }
     if (eps.isEmpty()) {
         LaunchedEffect(Unit) { onBack() }
@@ -84,7 +85,7 @@ fun DramaScreen(vm: AppViewModel, seriesId: Long, startEp: Int, onBack: () -> Un
             ) {
                 val proj = e.project
                 if (proj != null) {
-                    ProjectPlayer(proj, e.id, pager.currentPage == i && !paused && !sheetOpen && AppState.foreground, settings.muted) { p ->
+                    ProjectPlayer(proj, e.id, pager.currentPage == i && !paused && !sheetOpen && !breakOn && AppState.foreground, settings.muted) { p ->
                         if (pager.currentPage == i) {
                             progress = p
                             // one finished: the next episode comes
