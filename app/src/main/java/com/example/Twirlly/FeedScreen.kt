@@ -216,6 +216,7 @@ fun VideoPage(v: Video, active: Boolean, vm: AppViewModel, onUser: (Video) -> Un
     var progress by remember { mutableFloatStateOf(0f) }
     val vids by vm.videos.collectAsState()
     val dramaOpen by vm.drama.collectAsState()
+    val breakOn by vm.breakDue.collectAsState()
     val isDrama = v.seriesTitle != null
     val sid = v.seriesId ?: v.id
     val epCount = if (isDrama) vids.count { it.seriesId == sid } else 0
@@ -239,11 +240,11 @@ fun VideoPage(v: Video, active: Boolean, vm: AppViewModel, onUser: (Video) -> Un
         }
     ) {
         if (proj != null) {
-            ProjectPlayer(proj, v.id, active && !paused && dramaOpen == null, settings.muted) { progress = it }
+            ProjectPlayer(proj, v.id, active && !paused && dramaOpen == null && !breakOn, settings.muted) { progress = it }
         } else if (v.isImage) {
             val pager = rememberPagerState { photos.size }
             LaunchedEffect(active, paused, photos.size) {
-                while (active && !paused && dramaOpen == null && photos.size > 1) {
+                while (active && !paused && dramaOpen == null && !breakOn && photos.size > 1) {
                     delay(3000)
                     pager.animateScrollToPage((pager.currentPage + 1) % photos.size)
                 }
@@ -268,10 +269,10 @@ fun VideoPage(v: Video, active: Boolean, vm: AppViewModel, onUser: (Video) -> Un
                 }
             }
             if (audioPath != null) {
-                AudioLayer(mediaUri(audioPath), active && !paused && dramaOpen == null && AppState.foreground, settings.muted)
+                AudioLayer(mediaUri(audioPath), active && !paused && dramaOpen == null && !breakOn && AppState.foreground, settings.muted)
             }
         } else {
-            PlayerLayer(v, active && !paused && dramaOpen == null, settings.muted) { progress = it }
+            PlayerLayer(v, active && !paused && dramaOpen == null && !breakOn, settings.muted) { progress = it }
         }
         if (paused && (!v.isImage || isAlbum)) Icon(Icons.Default.PlayArrow, null, tint = Color.White.copy(alpha = .7f),
             modifier = Modifier.align(Alignment.Center).size(88.dp))
