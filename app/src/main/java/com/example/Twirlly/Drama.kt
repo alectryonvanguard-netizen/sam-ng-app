@@ -1,344 +1,223 @@
 package com.example.twirlly
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.pager.VerticalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Bookmark
-import androidx.compose.material.icons.filled.Comment
-import androidx.compose.material.icons.filled.Favorite
-import androidx.compose.material.icons.filled.MusicNote
-import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Share
-import androidx.compose.material.icons.filled.VolumeMute
-import androidx.compose.material.icons.filled.VolumeUp
-import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.Explore
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Inbox
-import androidx.compose.material.icons.filled.Person
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
-import androidx.compose.material3.NavigationBarItemDefaults
-import androidx.compose.material3.Text
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
+private val PURPLE = Color(0xFFB44CFF)
+
+/**
+ * A drama: every episode is a normal video with its own likes, comments, saves and shares.
+ * Swipe up for the next episode, it moves on by itself when one ends, and the episode button jumps to any episode.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun DramaPlayer(
-    vm: AppViewModel,
-    v: Video,
-    muted: Boolean,
-    onToggleMute: () -> Unit = {},
-    onNavigateTab: (String) -> Unit = {},
-    onClose: () -> Unit
-) {
-    val videos by vm.videos.collectAsState()
+fun DramaScreen(vm: AppViewModel, seriesId: Long, startEp: Int, onBack: () -> Unit) {
+    val all by vm.videos.collectAsState()
+    val settings by vm.settings.collectAsState()
     val profile by vm.profile.collectAsState()
-    val currentVideo = videos.find { it.id == v.id } ?: v
-
-    // Resolve true series episodes: map each episode ID to its unique project JSON
-    val episodeVideos = remember(currentVideo.episodes, videos) {
-        if (currentVideo.episodes.isNotEmpty()) {
-            currentVideo.episodes.mapNotNull { epId -> videos.find { it.id == epId } }
-        } else {
-            listOf(currentVideo)
-        }
+    val eps = all.filter { it.seriesId == seriesId }.sortedBy { it.episodeNo }
+    if (eps.isEmpty()) {
+        LaunchedEffect(Unit) { onBack() }
+        return
     }
+    val startIndex = remember { eps.indexOfFirst { it.episodeNo == startEp }.coerceAtLeast(0) }
+    val pager = rememberPagerState(initialPage = startIndex) { eps.size }
+    val scope = rememberCoroutineScope()
+    var paused by remember { mutableStateOf(false) }
+    var heart by remember { mutableStateOf(false) }
+    var progress by remember { mutableFloatStateOf(0f) }
+    var advancedFrom by remember { mutableIntStateOf(-1) }
+    var jumpOpen by remember { mutableStateOf(false) }
+    var commentsId by remember { mutableStateOf<Long?>(null) }
+    var shareId by remember { mutableStateOf<Long?>(null) }
+    val cur = eps[pager.currentPage.coerceIn(0, eps.size - 1)]
+    val sheetOpen = jumpOpen || commentsId != null || shareId != null
+    val title = cur.seriesTitle ?: "Drama"
+    val verified = !cur.local || settings.premium
 
-    if (episodeVideos.isEmpty()) return
+    LaunchedEffect(pager.currentPage) { advancedFrom = -1; progress = 0f; paused = false }
+    LaunchedEffect(heart) { if (heart) { delay(700); heart = false } }
 
-    val pager = rememberPagerState { episodeVideos.size }
-    val activeVideo = episodeVideos[pager.currentPage]
-    val dramaTitle = currentVideo.seriesTitle ?: currentVideo.caption.ifBlank { "Drama Series" }
-
-    Dialog(
-        onDismissRequest = onClose,
-        properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)
-    ) {
-        // Opaque black container ensuring zero background feed bleed-through and fully pausing underlying feed
-        Box(
-            Modifier
-                .fillMaxSize()
-                .background(Color.Black)
-        ) {
-            // Independent Vertical Episode Pager
-            VerticalPager(
-                state = pager,
-                modifier = Modifier.fillMaxSize()
-            ) { i ->
-                val ep = episodeVideos[i]
-                Box(
-                    Modifier
-                        .fillMaxSize()
-                        .background(Color.Black)
-                ) {
-                    if (ep.project != null) {
-                        ProjectPlayer(
-                            json = ep.project!!,
-                            id = ep.id.toInt() * 100 + i,
-                            playing = pager.currentPage == i,
-                            muted = muted
-                        ) { }
-                    }
-                }
-            }
-
-            // Top Header: Back button, Centered Title, Mute Control
+    Box(Modifier.fillMaxSize().background(Color.Black)) {
+        VerticalPager(pager, Modifier.fillMaxSize()) { i ->
+            val e = eps[i]
             Box(
-                Modifier
-                    .align(Alignment.TopCenter)
-                    .fillMaxWidth()
-                    .background(Color.Black.copy(alpha = 0.5f))
-                    .statusBarsPadding()
-                    .padding(horizontal = 16.dp, vertical = 12.dp),
-                contentAlignment = Alignment.Center
+                Modifier.fillMaxSize().pointerInput(e.id) {
+                    detectTapGestures(
+                        onTap = { paused = !paused },
+                        onDoubleTap = { vm.doubleTapLike(e.id); heart = true }
+                    )
+                }
             ) {
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    IconButton(onClick = onClose) {
-                        Icon(
-                            Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = "Back",
-                            tint = Color.White,
-                            modifier = Modifier.size(28.dp)
-                        )
-                    }
-
-                    IconButton(onClick = onToggleMute) {
-                        Icon(
-                            if (muted) Icons.Default.VolumeMute else Icons.Default.VolumeUp,
-                            contentDescription = "Mute",
-                            tint = Color.White,
-                            modifier = Modifier.size(28.dp)
-                        )
-                    }
-                }
-
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(
-                        text = dramaTitle,
-                        color = Color.White,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 18.sp,
-                        maxLines = 1
-                    )
-                    Spacer(Modifier.height(4.dp))
-                    Box(
-                        Modifier
-                            .width(60.dp)
-                            .height(3.dp)
-                            .background(Color(0xFFB82EFF))
-                    )
-                }
-            }
-
-            // Right-side Action Bar (Avatar, Like, Comment, Save, Share) fully bound to ViewModel
-            Column(
-                Modifier
-                    .align(Alignment.BottomEnd)
-                    .padding(end = 12.dp, bottom = 90.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(16.dp)
-            ) {
-                // Creator Avatar (linked with profile state)
-                Avatar(
-                    avatarUri = if (activeVideo.user == profile.name) profile.avatar else null,
-                    name = activeVideo.user,
-                    size = 48.dp
-                )
-
-                // Like Button
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    IconButton(onClick = { vm.toggleLike(activeVideo.id) }) {
-                        Icon(
-                            Icons.Default.Favorite,
-                            contentDescription = "Like",
-                            tint = if (activeVideo.liked) Color(0xFFFF2D55) else Color.White,
-                            modifier = Modifier.size(32.dp)
-                        )
-                    }
-                    Text(
-                        text = fmt(activeVideo.likes),
-                        color = Color.White,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-
-                // Comment Button
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    IconButton(onClick = { /* Handle comments bottom sheet */ }) {
-                        Icon(
-                            Icons.Default.Comment,
-                            contentDescription = "Comments",
-                            tint = Color.White,
-                            modifier = Modifier.size(30.dp)
-                        )
-                    }
-                    Text(
-                        text = fmt(activeVideo.comments.size),
-                        color = Color.White,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-
-                // Save/Bookmark Button
-                IconButton(onClick = { vm.toggleSave(activeVideo.id) }) {
-                    Icon(
-                        Icons.Default.Bookmark,
-                        contentDescription = "Save",
-                        tint = if (activeVideo.saved) Color(0xFFFFD700) else Color.White,
-                        modifier = Modifier.size(32.dp)
-                    )
-                }
-
-                // Share Button
-                IconButton(onClick = { vm.share(activeVideo.id) }) {
-                    Icon(
-                        Icons.Default.Share,
-                        contentDescription = "Share",
-                        tint = Color.White,
-                        modifier = Modifier.size(30.dp)
-                    )
-                }
-            }
-
-            // Bottom Synopsis & Episode Info Area
-            Box(
-                Modifier
-                    .align(Alignment.BottomStart)
-                    .fillMaxWidth(0.8f)
-                    .padding(start = 16.dp, bottom = 90.dp)
-            ) {
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Text(
-                            text = "@${activeVideo.user}",
-                            color = Color.White,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 15.sp
-                        )
-                        Box(
-                            Modifier
-                                .size(14.dp)
-                                .clip(CircleShape)
-                                .background(Color(0xFF0095F6)),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text("✓", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                val proj = e.project
+                if (proj != null) {
+                    ProjectPlayer(proj, e.id, pager.currentPage == i && !paused && !sheetOpen && AppState.foreground, settings.muted) { p ->
+                        if (pager.currentPage == i) {
+                            progress = p
+                            // one finished: the next episode comes
+                            if (p >= 0.985f && i < eps.size - 1 && advancedFrom != i) {
+                                advancedFrom = i
+                                scope.launch { pager.animateScrollToPage(i + 1) }
+                            }
                         }
                     }
+                }
+            }
+        }
 
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        Icon(
-                            Icons.Default.PlayArrow,
-                            contentDescription = null,
-                            tint = Color.White,
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Text(
-                            text = "Episode ${pager.currentPage + 1} of ${episodeVideos.size}",
-                            color = Color.White,
-                            fontWeight = FontWeight.SemiBold,
-                            fontSize = 13.sp
-                        )
-                    }
+        if (paused) Icon(
+            Icons.Default.PlayArrow, null, tint = Color.White.copy(alpha = .7f),
+            modifier = Modifier.align(Alignment.Center).size(88.dp)
+        )
+        AnimatedVisibility(heart, Modifier.align(Alignment.Center), enter = scaleIn(), exit = fadeOut()) {
+            Icon(Icons.Default.Favorite, null, tint = Color(0xFFFF2D87), modifier = Modifier.size(110.dp))
+        }
 
-                    Text(
-                        text = "\"${activeVideo.caption}\"",
-                        color = Color.White.copy(alpha = 0.9f),
-                        fontSize = 13.sp,
-                        lineHeight = 18.sp
-                    )
+        // top: back arrow, title, sound
+        Box(
+            Modifier.align(Alignment.TopCenter).fillMaxWidth().height(140.dp)
+                .background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.6f), Color.Transparent)))
+        )
+        Box(Modifier.align(Alignment.TopCenter).fillMaxWidth().statusBarsPadding().padding(horizontal = 6.dp, vertical = 6.dp)) {
+            IconButton(onClick = onBack, modifier = Modifier.align(Alignment.CenterStart)) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = Color.White, modifier = Modifier.size(30.dp))
+            }
+            Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
+                Text("Drama", color = Color.White, fontSize = 26.sp, fontWeight = FontWeight.Bold)
+                Box(
+                    Modifier.padding(top = 2.dp).width(96.dp).height(3.dp).clip(CircleShape)
+                        .background(Brush.horizontalGradient(listOf(Color(0xFF7B2FF7), PURPLE)))
+                )
+            }
+            IconButton(onClick = { vm.updateSettings { it.copy(muted = !it.muted) } }, modifier = Modifier.align(Alignment.CenterEnd)) {
+                Icon(if (settings.muted) Icons.Default.VolumeOff else Icons.Default.VolumeUp, "Sound", tint = Color.White, modifier = Modifier.size(30.dp))
+            }
+        }
 
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        modifier = Modifier.padding(top = 4.dp)
-                    ) {
-                        Icon(
-                            Icons.Default.MusicNote,
-                            contentDescription = null,
-                            tint = Color.White,
-                            modifier = Modifier.size(14.dp)
-                        )
-                        Text(
-                            text = activeVideo.music.ifBlank { "Original sound" },
-                            color = Color.White,
-                            fontSize = 12.sp
-                        )
+        // bottom: details
+        Box(
+            Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(420.dp)
+                .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.78f))))
+        )
+        Column(Modifier.align(Alignment.BottomStart).padding(start = 14.dp, bottom = 10.dp, end = 84.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Avatar(
+                    if (cur.local) profile.avatar else null, cur.user, 56.dp,
+                    Modifier.border(2.dp, Brush.linearGradient(listOf(Color(0xFF7B2FF7), PURPLE)), CircleShape)
+                )
+                Spacer(Modifier.width(12.dp))
+                Text("@" + cur.user, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 20.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (verified) {
+                    Spacer(Modifier.width(6.dp))
+                    Icon(Icons.Default.Verified, "Verified", tint = Color(0xFF1D9BF0), modifier = Modifier.size(24.dp))
+                }
+            }
+            Spacer(Modifier.height(10.dp))
+            Text(
+                buildAnnotatedString {
+                    withStyle(SpanStyle(color = PURPLE, fontWeight = FontWeight.Bold)) { append("[ ") }
+                    withStyle(SpanStyle(color = Color.White, fontWeight = FontWeight.Bold)) { append(title.uppercase()) }
+                    withStyle(SpanStyle(color = PURPLE, fontWeight = FontWeight.Bold)) { append(" ]") }
+                },
+                fontSize = 26.sp, maxLines = 2, overflow = TextOverflow.Ellipsis
+            )
+            Row(
+                Modifier.padding(vertical = 6.dp).clip(RoundedCornerShape(50)).clickable { jumpOpen = true }.padding(end = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(Icons.Default.PlayArrow, null, tint = Color.White, modifier = Modifier.size(32.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("Episode " + cur.episodeNo + " of " + eps.size, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 20.sp)
+                Spacer(Modifier.width(6.dp))
+                Icon(Icons.Default.ExpandLess, "Jump to an episode", tint = Color.White, modifier = Modifier.size(22.dp))
+            }
+            Text("\u201C" + cur.caption + "\u201D", color = Color.White, fontSize = 17.sp, maxLines = 4, overflow = TextOverflow.Ellipsis)
+            HorizontalDivider(Modifier.padding(top = 10.dp), color = Color.White.copy(alpha = 0.3f))
+            Row(Modifier.padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.MusicNote, null, tint = Color.White, modifier = Modifier.size(24.dp))
+                Spacer(Modifier.width(10.dp))
+                Text(cur.music, color = Color.White, fontSize = 17.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            HorizontalDivider(color = Color.White.copy(alpha = 0.3f))
+        }
+
+        // right rail: every button belongs to the episode you are watching
+        Column(
+            Modifier.align(Alignment.BottomEnd).padding(end = 10.dp, bottom = 120.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            Avatar(if (cur.local) profile.avatar else null, cur.user, 48.dp)
+            Action(Icons.Default.Favorite, fmt(cur.likes), if (cur.liked) Color(0xFFFF2D87) else Color.White) { vm.toggleLike(cur.id) }
+            Action(Icons.Default.ChatBubble, fmt(cur.comments.size), Color.White) { commentsId = cur.id }
+            Action(Icons.Default.Bookmark, "", if (cur.saved) Color(0xFFFFC107) else Color.White) { vm.toggleSave(cur.id) }
+            Action(Icons.Default.Link, "", Color.White) { shareId = cur.id }
+        }
+
+        LinearProgressIndicator(
+            progress = { progress },
+            modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(2.dp),
+            color = Color.White, trackColor = Color.White.copy(alpha = .2f)
+        )
+    }
+
+    if (jumpOpen) {
+        ModalBottomSheet(onDismissRequest = { jumpOpen = false }, containerColor = Color(0xFF14141C)) {
+            Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 16.dp).padding(bottom = 16.dp)) {
+                Text("Episodes (" + eps.size + ")", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                Text("Tap a number to jump to that episode.", color = Color.Gray, fontSize = 12.sp)
+                Spacer(Modifier.height(12.dp))
+                LazyVerticalGrid(GridCells.Fixed(5), Modifier.heightIn(max = 300.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    itemsIndexed(eps) { idx, e ->
+                        val on = idx == pager.currentPage
+                        Box(
+                            Modifier.size(54.dp).clip(CircleShape)
+                                .background(if (on) Brush.linearGradient(listOf(Color(0xFFFF2D87), Color(0xFF7B2FF7))) else Brush.linearGradient(listOf(Color.White.copy(alpha = 0.12f), Color.White.copy(alpha = 0.12f))))
+                                .clickable { jumpOpen = false; scope.launch { pager.animateScrollToPage(idx) } },
+                            contentAlignment = Alignment.Center
+                        ) { Text(e.episodeNo.toString(), color = Color.White, fontWeight = FontWeight.Bold, fontSize = 18.sp) }
                     }
                 }
             }
-
-            // Global Bottom Navigation Bar anchored at the bottom
-            NavigationBar(
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .fillMaxWidth(),
-                containerColor = Color.Black,
-                contentColor = Color.White
-            ) {
-                NavigationBarItem(
-                    selected = false,
-                    onClick = { onNavigateTab("Home"); onClose() },
-                    icon = { Icon(Icons.Default.Home, contentDescription = "Home") },
-                    label = { Text("Home") },
-                    colors = NavigationBarItemDefaults.colors(unselectedIconColor = Color.Gray, unselectedTextColor = Color.Gray)
-                )
-                NavigationBarItem(
-                    selected = false,
-                    onClick = { onNavigateTab("Discover"); onClose() },
-                    icon = { Icon(Icons.Default.Explore, contentDescription = "Discover") },
-                    label = { Text("Discover") },
-                    colors = NavigationBarItemDefaults.colors(unselectedIconColor = Color.Gray, unselectedTextColor = Color.Gray)
-                )
-                NavigationBarItem(
-                    selected = false,
-                    onClick = { onNavigateTab("Plus"); onClose() },
-                    icon = { Icon(Icons.Default.Add, contentDescription = "Plus") },
-                    label = { Text("Plus") },
-                    colors = NavigationBarItemDefaults.colors(unselectedIconColor = Color.Gray, unselectedTextColor = Color.Gray)
-                )
-                NavigationBarItem(
-                    selected = false,
-                    onClick = { onNavigateTab("Inbox"); onClose() },
-                    icon = { Icon(Icons.Default.Inbox, contentDescription = "Inbox") },
-                    label = { Text("Inbox") },
-                    colors = NavigationBarItemDefaults.colors(unselectedIconColor = Color.Gray, unselectedTextColor = Color.Gray)
-                )
-                NavigationBarItem(
-                    selected = false,
-                    onClick = { onNavigateTab("Profile"); onClose() },
-                    icon = { Icon(Icons.Default.Person, contentDescription = "Profile") },
-                    label = { Text("Profile") },
-                    colors = NavigationBarItemDefaults.colors(unselectedIconColor = Color.Gray, unselectedTextColor = Color.Gray)
-                )
-            }
         }
     }
+    commentsId?.let { id ->
+        eps.firstOrNull { it.id == id }?.let { e ->
+            ModalBottomSheet(onDismissRequest = { commentsId = null }, containerColor = Color(0xFF1A1A1A)) { CommentsSheet(e, vm) }
+        }
+    }
+    shareId?.let { id -> eps.firstOrNull { it.id == id }?.let { e -> ShareSheet(e, vm) { shareId = null } } }
 }
