@@ -325,7 +325,19 @@ fun VideoPage(v: Video, active: Boolean, vm: AppViewModel, onUser: (Video) -> Un
     }
 
     if (showShare) ShareSheet(v, vm) { showShare = false }
-    if (showDrama) DramaPlayer(v, settings.muted) { showDrama = false }
+    
+    // Corrected DramaPlayer call matching its parameters
+    if (showDrama) {
+        DramaPlayer(
+            vm = vm,
+            v = v,
+            muted = settings.muted,
+            onToggleMute = { vm.updateSettings { it.copy(muted = !it.muted) } },
+            onNavigateTab = { tab -> /* handle navigation */ },
+            onClose = { showDrama = false }
+        )
+    }
+
     if (showComments) {
         ModalBottomSheet(onDismissRequest = { showComments = false }, containerColor = Color(0xFF1A1A1A)) {
             CommentsSheet(v, vm)
