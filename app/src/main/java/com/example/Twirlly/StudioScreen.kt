@@ -417,12 +417,15 @@ private fun Timeline(
 }
 
 @Composable
-private fun PostDetails(thumb: String?, suggested: List<String>, premium: Boolean, onNeedPremium: () -> Unit, onBack: () -> Unit, onPost: (String) -> Unit) {
+private fun PostDetails(thumb: String?, suggested: List<String>, dramas: List<Pair<Long, String>>, premium: Boolean, onNeedPremium: () -> Unit, onBack: () -> Unit, onPost: (String, SeriesChoice?) -> Unit) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     var busy by remember { mutableStateOf(false) }
     var desc by remember { mutableStateOf("") }
     var tagInput by remember { mutableStateOf("") }
+    var dramaMode by remember { mutableIntStateOf(0) }
+    var dramaTitle by remember { mutableStateOf("") }
+    var dramaTarget by remember { mutableStateOf<Long?>(null) }
     val tags = remember { mutableStateListOf<String>() }
     fun addTag(raw: String) {
         val w = raw.trim().trimStart('#').replace(Regex("[^\\p{L}\\p{N}_]"), "")
@@ -480,9 +483,31 @@ private fun PostDetails(thumb: String?, suggested: List<String>, premium: Boolea
                 Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     suggested.forEach { s -> Chip(s, s in tags) { if (s in tags) tags.remove(s) else addTag(s) } }
                 }
+                Spacer(Modifier.height(16.dp))
+                Text("Drama (many episodes in one)", fontWeight = FontWeight.Bold)
+                Text("Viewers triple-tap a drama to open all its episodes.", fontSize = 12.sp, color = Color.Gray)
+                Row(Modifier.horizontalScroll(rememberScrollState()).padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Chip("Single post", dramaMode == 0 && dramaTarget == null) { dramaMode = 0; dramaTarget = null }
+                    Chip("New drama", dramaMode == 1) { dramaMode = 1; dramaTarget = null }
+                    dramas.forEach { (id, t) -> Chip("Next episode of: " + t.take(18), dramaTarget == id) { dramaTarget = id; dramaMode = 0 } }
+                }
+                if (dramaMode == 1) {
+                    OutlinedTextField(
+                        value = dramaTitle, onValueChange = { dramaTitle = it.take(60) },
+                        label = { Text("Drama title") }, singleLine = true,
+                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+                    )
+                }
                 Spacer(Modifier.height(24.dp))
                 Button(
-                    onClick = { onPost((desc.trim() + " " + tags.joinToString(" ")).trim()) },
+                    onClick = {
+                        val choice = when {
+                            dramaTarget != null -> SeriesChoice(addToId = dramaTarget)
+                            dramaMode == 1 && dramaTitle.isNotBlank() -> SeriesChoice(newTitle = dramaTitle)
+                            else -> null
+                        }
+                        onPost((desc.trim() + " " + tags.joinToString(" ")).trim(), choice)
+                    },
                     modifier = Modifier.fillMaxWidth().height(52.dp),
                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00C8E0), contentColor = Color.Black)
                 ) { Text("Post", fontWeight = FontWeight.Bold, fontSize = 16.sp) }
@@ -1335,11 +1360,11 @@ private fun EditorBody(vm: AppViewModel, uris: List<Uri>, onClose: () -> Unit, o
                 .entries.sortedByDescending { it.value }.take(8).map { it.key }
         }
         val suggested = (trending + listOf("#fyp", "#viral", "#foryou", "#trending", "#edit")).distinct().take(12)
-        PostDetails(project.clips.firstOrNull()?.path, suggested, premium, onNeedPremium = { premiumPrompt = true }, onBack = { showPost = false }) { cap ->
+        PostDetails(project.clips.firstOrNull()?.path, suggested, vids.filter { it.local && it.seriesTitle != null }.map { it.id to (it.seriesTitle ?: "") }, premium, onNeedPremium = { premiumPrompt = true }, onBack = { showPost = false }) { cap, choice ->
             showPost = false
             val used = project.files().toSet()
             imported.filter { it !in used }.forEach { File(it).delete() }
-            vm.postProject(project, cap) { onPosted() }
+            vm.postProject(project, cap, choice) { onPosted() }
         }
     }
     if (ratioOpen) {
