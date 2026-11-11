@@ -1,4 +1,4 @@
-package com.example.twirlly
+Package com.example.twirlly
 
 import android.app.Application
 import android.widget.Toast
@@ -22,6 +22,11 @@ data class Comment(
 
 fun wordCount(s: String): Int = s.trim().split(Regex("\\s+")).count { it.isNotEmpty() }
 
+data class SeriesChoice(
+    val addToId: Long? = null,
+    val newTitle: String? = null
+)
+
 data class Video(
     val id: Long,
     val url: String,
@@ -38,7 +43,9 @@ data class Video(
     val createdAt: Long = 0L,
     val images: List<String> = emptyList(),
     val audio: String? = null,
-    val project: String? = null
+    val project: String? = null,
+    val seriesTitle: String? = null,
+    val episodes: List<Long> = emptyList()
 )
 
 data class Profile(
@@ -66,7 +73,8 @@ data class AppSettings(
     val theme: Int = 0,
     val accent: Int = 0,
     val onboarded: Boolean = false,
-    val premium: Boolean = false
+    val premium: Boolean = false,
+    val coins: Int = 100
 )
 
 data class ActivityEvent(val id: Long, val text: String, val time: Long, val type: Int = 0, val videoId: Long = 0L, val sys: Boolean = true)
@@ -81,11 +89,13 @@ private fun Video.toJson(): JSONObject = JSONObject().apply {
         }
     })
     put("images", JSONArray(images)); put("audio", audio ?: ""); put("project", project ?: "")
+    put("seriesTitle", seriesTitle ?: ""); put("episodes", JSONArray(episodes))
 }
 
 private fun JSONObject.toVideo(): Video {
     val cs = optJSONArray("comments") ?: JSONArray()
     val imgs = optJSONArray("images") ?: JSONArray()
+    val eps = optJSONArray("episodes") ?: JSONArray()
     return Video(
         id = getLong("id"), url = getString("url"), isImage = optBoolean("img"), local = optBoolean("local"),
         user = getString("user"), caption = getString("cap"), music = optString("music"), likes = optInt("likes"),
@@ -97,7 +107,9 @@ private fun JSONObject.toVideo(): Video {
         createdAt = optLong("t"),
         images = (0 until imgs.length()).map { imgs.getString(it) },
         audio = optString("audio", "").takeIf { it.isNotBlank() },
-        project = optString("project", "").takeIf { it.isNotBlank() }
+        project = optString("project", "").takeIf { it.isNotBlank() },
+        seriesTitle = optString("seriesTitle", "").takeIf { it.isNotBlank() },
+        episodes = (0 until eps.length()).map { eps.getLong(it) }
     )
 }
 
@@ -165,7 +177,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 _settings.value = AppSettings(
                     notifications = s.optBoolean("notif", true), autoplay = s.optBoolean("auto", true),
                     muted = s.optBoolean("muted", false), theme = s.optInt("theme", 0), accent = s.optInt("accent", 0),
-                    onboarded = s.optBoolean("onb", false), premium = s.optBoolean("prem", false), email = s.optString("email", "")
+                    onboarded = s.optBoolean("onb", false), premium = s.optBoolean("prem", false), email = s.optString("email", ""),
+                    coins = s.optInt("coins", 100)
                 )
             }
             val ev = o.optJSONArray("events") ?: JSONArray()
@@ -186,7 +199,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             .put("avatar", p.avatar ?: "").put("banner", p.banner ?: "").put("bv", p.bannerVideo).put("bs", p.bannerStartMs).put("bsc", p.bannerScale.toDouble()).put("box", p.bannerOx.toDouble()).put("boy", p.bannerOy.toDouble()).put("private", p.isPrivate))
         val s = _settings.value
         put("settings", JSONObject().put("notif", s.notifications).put("auto", s.autoplay).put("muted", s.muted)
-            .put("theme", s.theme).put("accent", s.accent).put("onb", s.onboarded).put("prem", s.premium).put("email", s.email))
+            .put("theme", s.theme).put("accent", s.accent).put("onb", s.onboarded).put("prem", s.premium).put("email", s.email).put("coins", s.coins))
         put("events", JSONArray().also { a ->
             _events.value.forEach { a.put(JSONObject().put("id", it.id).put("x", it.text).put("t", it.time).put("ty", it.type).put("vid", it.videoId).put("sys", it.sys)) }
         })
@@ -264,18 +277,28 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         persist()
     }
 
-    fun postProject(p: Project, caption: String, onDone: () -> Unit) {
+    fun postProject(p: Project, caption: String, seriesChoice: SeriesChoice? = null, onDone: () -> Unit) {
         if (p.clips.isEmpty()) return
         val me = _profile.value.name
+        val newVideoId = System.currentTimeMillis()
         val v = Video(
-            id = System.currentTimeMillis(), url = p.clips[0].path, isImage = false, local = true, user = me,
+            id = newVideoId, url = p.clips[0].path, isImage = false, local = true, user = me,
             caption = caption.ifBlank { "My new edit" },
             music = p.audios.firstOrNull()?.name?.ifBlank { "Added song" } ?: "Original sound - $me",
-            likes = 0, createdAt = System.currentTimeMillis(), project = p.toJson()
+            likes = 0, createdAt = System.currentTimeMillis(), project = p.toJson(),
+            seriesTitle = seriesChoice?.newTitle
         )
-        // limited storage: only links to your gallery are kept, and only the newest posts
+        
         _videos.update { cur ->
-            val all = listOf(v) + cur
+            var list = cur
+            if (seriesChoice?.addToId != null) {
+                list = list.map { vid ->
+                    if (vid.id == seriesChoice.addToId) {
+                        vid.copy(episodes = vid.episodes + newVideoId)
+                    } else vid
+                }
+            }
+            val all = listOf(v) + list
             val keep = all.filter { it.local }.take(MAX_OWN_POSTS).map { it.id }.toSet()
             all.filter { !it.local || it.id in keep }
         }
@@ -283,6 +306,23 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         persist()
         if (_settings.value.notifications) Notifier.send(ctx, "Posted on Twirlly", "Your edit is live on your profile.")
         onDone()
+    }
+
+    fun spendCoins(amount: Int): Boolean {
+        var success = false
+        _settings.update { s ->
+            if (s.coins >= amount) {
+                success = true
+                s.copy(coins = s.coins - amount)
+            } else s
+        }
+        persist()
+        return success
+    }
+
+    fun addCoins(amount: Int) {
+        _settings.update { it.copy(coins = it.coins + amount) }
+        persist()
     }
 
     fun deletePost(id: Long) {
