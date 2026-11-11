@@ -124,6 +124,7 @@ fun TwirllyApp(vm: AppViewModel) {
     val ctx = LocalContext.current
     val videos by vm.videos.collectAsState()
     val settings by vm.settings.collectAsState()
+    val drama by vm.drama.collectAsState()
     var tab by remember { mutableIntStateOf(0) }
     var overlay by remember { mutableStateOf<Overlay?>(null) }
 
@@ -134,15 +135,18 @@ fun TwirllyApp(vm: AppViewModel) {
         ) permLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
 
-    BackHandler(enabled = overlay != null) {
-        val o = overlay
-        overlay = if (o is Overlay.Viewer) o.back else null
+    BackHandler(enabled = overlay != null || drama != null) {
+        if (drama != null) vm.closeDrama()
+        else {
+            val o = overlay
+            overlay = if (o is Overlay.Viewer) o.back else null
+        }
     }
 
     val view = LocalView.current
     val darkTheme = settings.theme == 1 || (settings.theme == 0 && isSystemInDarkTheme())
     SideEffect {
-        val whiteIcons = darkTheme || tab == 0 || (tab == 4 && overlay == null) || overlay is Overlay.Viewer || overlay is Overlay.Editor || overlay is Overlay.User || overlay is Overlay.Live
+        val whiteIcons = darkTheme || drama != null || tab == 0 || (tab == 4 && overlay == null) || overlay is Overlay.Viewer || overlay is Overlay.Editor || overlay is Overlay.User || overlay is Overlay.Live
         val window = (view.context as? android.app.Activity)?.window
         if (window != null) {
             WindowCompat.getInsetsController(window, view).isAppearanceLightStatusBars = !whiteIcons
@@ -162,7 +166,7 @@ fun TwirllyApp(vm: AppViewModel) {
         bottomBar = {
             if (overlay !is Overlay.Editor) {
                 BottomBar(tab, barColor, fg) { i ->
-                    if (i == 2) overlay = Overlay.Editor(emptyList()) else { tab = i; overlay = null }
+                    if (i == 2) { vm.closeDrama(); overlay = Overlay.Editor(emptyList()) } else { vm.closeDrama(); tab = i; overlay = null }
                 }
             }
         }
@@ -198,6 +202,7 @@ fun TwirllyApp(vm: AppViewModel) {
                 is Overlay.Live -> LiveScreen(vm, o.preview) { overlay = null }
                 null -> Unit
             }
+            drama?.let { d -> DramaScreen(vm, d.first, d.second) { vm.closeDrama() } }
         }
     }
 }
