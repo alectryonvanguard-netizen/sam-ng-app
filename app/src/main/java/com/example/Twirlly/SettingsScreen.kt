@@ -174,6 +174,17 @@ fun SettingsScreen(vm: AppViewModel, onBack: () -> Unit, onEditProfile: () -> Un
             SettingsCard {
                 SwitchRow(Icons.Default.PlayArrow, "Autoplay", "Play videos as you scroll", s.autoplay) { v -> vm.updateSettings { it.copy(autoplay = v) } }
                 SwitchRow(Icons.Default.VolumeOff, "Start muted", "Videos start without sound", s.muted) { v -> vm.updateSettings { it.copy(muted = v) } }
+                Column(Modifier.padding(14.dp)) {
+                    Text("Break reminder", fontSize = 15.sp)
+                    Text("A reminder to rest after you have been watching for a while", fontSize = 12.sp, color = Color.Gray)
+                    Spacer(Modifier.height(6.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf(0 to "Off", 1 to "1 hour", 2 to "2 hours", 3 to "3 hours").forEach { (h, n) ->
+                            FilterChip(selected = s.breakHours == h, onClick = { vm.updateSettings { it.copy(breakHours = h) } }, label = { Text(n) })
+                        }
+                    }
+                }
+                Row3(Icons.Default.Timer, "Preview break screen", "See how it looks", onClick = { vm.previewBreak() })
             }
 
             Section("Appearance")
