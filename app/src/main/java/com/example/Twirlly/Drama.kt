@@ -1,4 +1,4 @@
-package com.example.twirlly
+package com.example.Twirlly
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -47,7 +47,7 @@ fun DramaPlayer(
     onClose: () -> Unit
 ) {
     val videos by vm.videos.collectAsState()
-    val currentVideo = videos.find { id == v.id } ?: v
+    val currentVideo = videos.find { it.id == v.id } ?: v
 
     // Resolve each episode ID to its unique project JSON string independently
     val episodeProjects = remember(currentVideo.episodes, videos) {
@@ -86,9 +86,9 @@ fun DramaPlayer(
                         .background(Color.Black)
                 ) {
                     ProjectPlayer(
-                        projectJson = episodeProjects[i],
-                        seed = currentVideo.id * 100 + i,
-                        isPlaying = pager.currentPage == i,
+                        json = episodeProjects[i],
+                        id = currentVideo.id * 100 + i,
+                        playing = pager.currentPage == i,
                         muted = muted
                     ) { }
                 }
