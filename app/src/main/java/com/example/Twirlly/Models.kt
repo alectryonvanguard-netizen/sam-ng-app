@@ -48,6 +48,10 @@ data class Profile(
     val avatar: String? = null,
     val banner: String? = null,
     val bannerVideo: Boolean = false,
+    val bannerStartMs: Long = 0L,
+    val bannerScale: Float = 1f,
+    val bannerOx: Float = 0f,
+    val bannerOy: Float = 0f,
     val isPrivate: Boolean = false
 )
 
@@ -150,6 +154,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     avatar = p.optString("avatar", "").takeIf { it.isNotBlank() },
                     banner = p.optString("banner", "").takeIf { it.isNotBlank() },
                     bannerVideo = p.optBoolean("bv"),
+                    bannerStartMs = p.optLong("bs", 0L),
+                    bannerScale = p.optDouble("bsc", 1.0).toFloat(),
+                    bannerOx = p.optDouble("box", 0.0).toFloat(),
+                    bannerOy = p.optDouble("boy", 0.0).toFloat(),
                     isPrivate = p.optBoolean("private")
                 )
             }
@@ -175,7 +183,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         put("following", JSONArray(_following.value.toList()))
         val p = _profile.value
         put("profile", JSONObject().put("name", p.name).put("dn", p.displayName).put("bio", p.bio)
-            .put("avatar", p.avatar ?: "").put("banner", p.banner ?: "").put("bv", p.bannerVideo).put("private", p.isPrivate))
+            .put("avatar", p.avatar ?: "").put("banner", p.banner ?: "").put("bv", p.bannerVideo).put("bs", p.bannerStartMs).put("bsc", p.bannerScale.toDouble()).put("box", p.bannerOx.toDouble()).put("boy", p.bannerOy.toDouble()).put("private", p.isPrivate))
         val s = _settings.value
         put("settings", JSONObject().put("notif", s.notifications).put("auto", s.autoplay).put("muted", s.muted)
             .put("theme", s.theme).put("accent", s.accent).put("onb", s.onboarded).put("prem", s.premium).put("email", s.email))
@@ -316,7 +324,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 f.writeBytes(bytes)
                 val old = if (banner) _profile.value.banner else _profile.value.avatar
                 if (old != null && !old.startsWith("content:")) File(old).delete()
-                _profile.update { if (banner) it.copy(banner = f.absolutePath, bannerVideo = false) else it.copy(avatar = f.absolutePath) }
+                _profile.update { if (banner) it.copy(banner = f.absolutePath, bannerVideo = false, bannerStartMs = 0L, bannerScale = 1f, bannerOx = 0f, bannerOy = 0f) else it.copy(avatar = f.absolutePath) }
                 addEvent(if (banner) "Banner updated" else "Profile picture updated", 7)
                 persist()
             } catch (e: Exception) {
@@ -326,10 +334,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** Banner video (5 to 10 seconds). Only the link to the gallery file is kept, nothing is copied. */
-    fun setBannerVideo(uri: String) {
+    fun setBannerVideo(uri: String, startMs: Long, scale: Float, ox: Float, oy: Float) {
         val old = _profile.value.banner
         if (old != null && !old.startsWith("content:")) File(old).delete()
-        _profile.update { it.copy(banner = uri, bannerVideo = true) }
+        _profile.update { it.copy(banner = uri, bannerVideo = true, bannerStartMs = startMs, bannerScale = scale, bannerOx = ox, bannerOy = oy) }
         addEvent("Banner updated", 7)
         persist()
     }
