@@ -77,6 +77,7 @@ const val STORAGE_LIMIT = 5_000_000L
 
 data class AppSettings(
     val email: String = "",
+    val breakHours: Int = 2,
     val coins: Int = 0,
     val notifications: Boolean = true,
     val autoplay: Boolean = true,
@@ -139,6 +140,34 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     val settings: StateFlow<AppSettings> = _settings.asStateFlow()
     private val _events = MutableStateFlow<List<ActivityEvent>>(emptyList())
     val events: StateFlow<List<ActivityEvent>> = _events.asStateFlow()
+    private var watchedSecs = 0L
+    private var lastTickAt = System.currentTimeMillis()
+    private val _breakDue = MutableStateFlow(false)
+    /** True when it is time for a break (you have been watching for the chosen number of hours). */
+    val breakDue: StateFlow<Boolean> = _breakDue.asStateFlow()
+
+    /** Called once a second by the app. Time spent watching adds up; being away for 30 minutes counts as a break. */
+    fun watchTick() {
+        if (!AppState.foreground || !_settings.value.onboarded || _breakDue.value) return
+        val hours = _settings.value.breakHours
+        if (hours <= 0) return
+        val now = System.currentTimeMillis()
+        if (now - lastTickAt > 30 * 60 * 1000L) watchedSecs = 0L
+        lastTickAt = now
+        watchedSecs += 1
+        if (watchedSecs % 30L == 0L) persist()
+        if (watchedSecs >= hours * 3600L) _breakDue.value = true
+    }
+
+    fun endBreak() {
+        watchedSecs = 0L
+        lastTickAt = System.currentTimeMillis()
+        _breakDue.value = false
+        persist()
+    }
+
+    fun previewBreak() { _breakDue.value = true }
+
     private val _drama = MutableStateFlow<Pair<Long, Int>?>(null)
     /** The drama that is open (series id and the episode to start on), or null. */
     val drama: StateFlow<Pair<Long, Int>?> = _drama.asStateFlow()
@@ -194,9 +223,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 _settings.value = AppSettings(
                     notifications = s.optBoolean("notif", true), autoplay = s.optBoolean("auto", true),
                     muted = s.optBoolean("muted", false), theme = s.optInt("theme", 0), accent = s.optInt("accent", 0),
-                    onboarded = s.optBoolean("onb", false), premium = s.optBoolean("prem", false), email = s.optString("email", ""), coins = s.optInt("coins", 0)
+                    onboarded = s.optBoolean("onb", false), premium = s.optBoolean("prem", false), email = s.optString("email", ""), coins = s.optInt("coins", 0), breakHours = s.optInt("brk", 2)
                 )
             }
+            watchedSecs = o.optLong("watch", 0L)
             val ev = o.optJSONArray("events") ?: JSONArray()
             _events.value = (0 until ev.length()).map {
                 val e = ev.getJSONObject(it)
@@ -215,7 +245,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             .put("avatar", p.avatar ?: "").put("banner", p.banner ?: "").put("bv", p.bannerVideo).put("bs", p.bannerStartMs).put("bsc", p.bannerScale.toDouble()).put("box", p.bannerOx.toDouble()).put("boy", p.bannerOy.toDouble()).put("nca", p.nameChangedAt).put("uca", p.usernameChangedAt).put("private", p.isPrivate))
         val s = _settings.value
         put("settings", JSONObject().put("notif", s.notifications).put("auto", s.autoplay).put("muted", s.muted)
-            .put("theme", s.theme).put("accent", s.accent).put("onb", s.onboarded).put("prem", s.premium).put("email", s.email).put("coins", s.coins))
+            .put("theme", s.theme).put("accent", s.accent).put("onb", s.onboarded).put("prem", s.premium).put("email", s.email).put("coins", s.coins).put("brk", s.breakHours))
+        put("watch", watchedSecs)
         put("events", JSONArray().also { a ->
             _events.value.forEach { a.put(JSONObject().put("id", it.id).put("x", it.text).put("t", it.time).put("ty", it.type).put("vid", it.videoId).put("sys", it.sys)) }
         })
