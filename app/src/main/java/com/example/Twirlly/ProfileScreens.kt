@@ -94,7 +94,7 @@ fun ProfileScreen(
     val settings by vm.settings.collectAsState()
     var tab by remember { mutableIntStateOf(0) }
     var deleteId by remember { mutableStateOf<Long?>(null) }
-    val mine = videos.filter { it.local }
+    val mine = videos.filter { it.local && (it.seriesId == null || it.episodeNo <= 1) }
     val shown = when (tab) { 0 -> mine; 1 -> videos.filter { it.liked }; else -> videos.filter { it.saved } }
     val statusTop = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
     val bannerPath = profile.banner
@@ -198,6 +198,8 @@ fun EditProfileScreen(vm: AppViewModel, onBack: () -> Unit) {
     var displayName by remember { mutableStateOf(profile.displayName) }
     var bio by remember { mutableStateOf(profile.bio) }
     var priv by remember { mutableStateOf(profile.isPrivate) }
+    val nameDays = cooldownDaysLeft(profile.nameChangedAt)
+    val userDays = cooldownDaysLeft(profile.usernameChangedAt)
     var positioning by remember { mutableStateOf<Pair<Uri, Boolean>?>(null) }
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -261,17 +263,23 @@ fun EditProfileScreen(vm: AppViewModel, onBack: () -> Unit) {
         Text("Tap the banner (photo or a 5 to 10 second video) or the round photo to change them.", color = Color.Gray, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 16.dp))
         Spacer(Modifier.height(12.dp))
         OutlinedTextField(
-            value = displayName, onValueChange = { displayName = it.take(40) }, label = { Text("Name") },
+            value = displayName, onValueChange = { displayName = it.take(40) }, label = { Text("Name") }, enabled = nameDays == 0,
             singleLine = true, modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)
         )
         Spacer(Modifier.height(12.dp))
         OutlinedTextField(
             value = name,
             onValueChange = { name = it.lowercase().filter { c -> c.isLetterOrDigit() || c == '_' || c == '.' }.take(24); saveError = null },
-            label = { Text("Username (unique)") }, prefix = { Text("@") },
+            label = { Text("Username (unique)") }, prefix = { Text("@") }, enabled = userDays == 0,
             singleLine = true, modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)
         )
-        Spacer(Modifier.height(12.dp))
+        Text(
+            "Name and username can be changed once every 7 days." +
+                (if (nameDays > 0) " Name: $nameDays day(s) left." else "") +
+                (if (userDays > 0) " Username: $userDays day(s) left." else ""),
+            color = Color.Gray, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)
+        )
+        Spacer(Modifier.height(6.dp))
         OutlinedTextField(
             value = bio, onValueChange = { bio = it.take(200) }, label = { Text("Bio") },
             minLines = 3, maxLines = 4, modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)
