@@ -47,50 +47,53 @@ fun DramaPlayer(
     onClose: () -> Unit
 ) {
     val videos by vm.videos.collectAsState()
+    val profile by vm.profile.collectAsState()
     val currentVideo = videos.find { it.id == v.id } ?: v
 
-    // Resolve each episode ID to its unique project JSON string independently
-    val episodeProjects = remember(currentVideo.episodes, videos) {
+    // Resolve true series episodes: map each episode ID to its unique project JSON
+    val episodeVideos = remember(currentVideo.episodes, videos) {
         if (currentVideo.episodes.isNotEmpty()) {
-            currentVideo.episodes.mapNotNull { epId ->
-                videos.find { it.id == epId }?.project
-            }
+            currentVideo.episodes.mapNotNull { epId -> videos.find { it.id == epId } }
         } else {
-            listOfNotNull(currentVideo.project)
+            listOf(currentVideo)
         }
     }
 
-    if (episodeProjects.isEmpty()) return
+    if (episodeVideos.isEmpty()) return
 
-    val pager = rememberPagerState { episodeProjects.size }
-    val dramaTitle = currentVideo.seriesTitle ?: "Drama Series"
+    val pager = rememberPagerState { episodeVideos.size }
+    val activeVideo = episodeVideos[pager.currentPage]
+    val dramaTitle = currentVideo.seriesTitle ?: currentVideo.caption.ifBlank { "Drama Series" }
 
     Dialog(
         onDismissRequest = onClose,
         properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)
     ) {
-        // Opaque container covering the entire screen to completely block background feed and status bar bleed
+        // Opaque black container ensuring zero background feed bleed-through and fully pausing underlying feed
         Box(
             Modifier
                 .fillMaxSize()
                 .background(Color.Black)
         ) {
-            // Independent Episode Pager
+            // Independent Vertical Episode Pager
             VerticalPager(
                 state = pager,
                 modifier = Modifier.fillMaxSize()
             ) { i ->
+                val ep = episodeVideos[i]
                 Box(
                     Modifier
                         .fillMaxSize()
                         .background(Color.Black)
                 ) {
-                    ProjectPlayer(
-                        json = episodeProjects[i],
-                        id = currentVideo.id * 100 + i,
-                        playing = pager.currentPage == i,
-                        muted = muted
-                    ) { }
+                    if (ep.project != null) {
+                        ProjectPlayer(
+                            json = ep.project!!,
+                            id = ep.id.toInt() * 100 + i,
+                            playing = pager.currentPage == i,
+                            muted = muted
+                        ) { }
+                    }
                 }
             }
 
@@ -99,7 +102,7 @@ fun DramaPlayer(
                 Modifier
                     .align(Alignment.TopCenter)
                     .fillMaxWidth()
-                    .background(Color.Black.copy(alpha = 0.4f))
+                    .background(Color.Black.copy(alpha = 0.5f))
                     .statusBarsPadding()
                     .padding(horizontal = 16.dp, vertical = 12.dp),
                 contentAlignment = Alignment.Center
@@ -146,7 +149,7 @@ fun DramaPlayer(
                 }
             }
 
-            // Right-side Action Bar (Like, Comment, Save, Share)
+            // Right-side Action Bar (Avatar, Like, Comment, Save, Share) fully bound to ViewModel
             Column(
                 Modifier
                     .align(Alignment.BottomEnd)
@@ -154,32 +157,25 @@ fun DramaPlayer(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
-                Box(
-                    Modifier
-                        .size(48.dp)
-                        .clip(CircleShape)
-                        .background(Color.DarkGray),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = currentVideo.user.take(1).uppercase(),
-                        color = Color.White,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
+                // Creator Avatar (linked with profile state)
+                Avatar(
+                    avatarUri = if (activeVideo.user == profile.name) profile.avatar else null,
+                    name = activeVideo.user,
+                    size = 48.dp
+                )
 
                 // Like Button
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    IconButton(onClick = { vm.toggleLike(currentVideo.id) }) {
+                    IconButton(onClick = { vm.toggleLike(activeVideo.id) }) {
                         Icon(
                             Icons.Default.Favorite,
                             contentDescription = "Like",
-                            tint = if (currentVideo.liked) Color(0xFFFF2D55) else Color.White,
+                            tint = if (activeVideo.liked) Color(0xFFFF2D55) else Color.White,
                             modifier = Modifier.size(32.dp)
                         )
                     }
                     Text(
-                        text = "${currentVideo.likes}",
+                        text = fmt(activeVideo.likes),
                         color = Color.White,
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Bold
@@ -188,7 +184,7 @@ fun DramaPlayer(
 
                 // Comment Button
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    IconButton(onClick = { /* Open comments bottom sheet */ }) {
+                    IconButton(onClick = { /* Handle comments bottom sheet */ }) {
                         Icon(
                             Icons.Default.Comment,
                             contentDescription = "Comments",
@@ -197,7 +193,7 @@ fun DramaPlayer(
                         )
                     }
                     Text(
-                        text = "${currentVideo.comments.size}",
+                        text = fmt(activeVideo.comments.size),
                         color = Color.White,
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Bold
@@ -205,17 +201,17 @@ fun DramaPlayer(
                 }
 
                 // Save/Bookmark Button
-                IconButton(onClick = { vm.toggleSave(currentVideo.id) }) {
+                IconButton(onClick = { vm.toggleSave(activeVideo.id) }) {
                     Icon(
                         Icons.Default.Bookmark,
                         contentDescription = "Save",
-                        tint = if (currentVideo.saved) Color(0xFFFFD700) else Color.White,
+                        tint = if (activeVideo.saved) Color(0xFFFFD700) else Color.White,
                         modifier = Modifier.size(32.dp)
                     )
                 }
 
                 // Share Button
-                IconButton(onClick = { vm.share(currentVideo.id) }) {
+                IconButton(onClick = { vm.share(activeVideo.id) }) {
                     Icon(
                         Icons.Default.Share,
                         contentDescription = "Share",
@@ -225,7 +221,7 @@ fun DramaPlayer(
                 }
             }
 
-            // Bottom Synopsis Area
+            // Bottom Synopsis & Episode Info Area
             Box(
                 Modifier
                     .align(Alignment.BottomStart)
@@ -238,7 +234,7 @@ fun DramaPlayer(
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         Text(
-                            text = "@${currentVideo.user}",
+                            text = "@${activeVideo.user}",
                             color = Color.White,
                             fontWeight = FontWeight.Bold,
                             fontSize = 15.sp
@@ -254,13 +250,6 @@ fun DramaPlayer(
                         }
                     }
 
-                    Text(
-                        text = "[ $dramaTitle ]",
-                        color = Color.White,
-                        fontWeight = FontWeight.Black,
-                        fontSize = 16.sp
-                    )
-
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(4.dp)
@@ -272,7 +261,7 @@ fun DramaPlayer(
                             modifier = Modifier.size(16.dp)
                         )
                         Text(
-                            text = "Episode ${pager.currentPage + 1} of ${episodeProjects.size}",
+                            text = "Episode ${pager.currentPage + 1} of ${episodeVideos.size}",
                             color = Color.White,
                             fontWeight = FontWeight.SemiBold,
                             fontSize = 13.sp
@@ -280,7 +269,7 @@ fun DramaPlayer(
                     }
 
                     Text(
-                        text = "\"${currentVideo.caption}\"",
+                        text = "\"${activeVideo.caption}\"",
                         color = Color.White.copy(alpha = 0.9f),
                         fontSize = 13.sp,
                         lineHeight = 18.sp
@@ -298,7 +287,7 @@ fun DramaPlayer(
                             modifier = Modifier.size(14.dp)
                         )
                         Text(
-                            text = currentVideo.music.ifBlank { "Original sound" },
+                            text = activeVideo.music.ifBlank { "Original sound" },
                             color = Color.White,
                             fontSize = 12.sp
                         )
