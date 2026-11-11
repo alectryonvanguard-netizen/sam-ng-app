@@ -30,7 +30,7 @@ import kotlinx.coroutines.launch
 /** All episodes of a drama. Swipe up for the next episode, or tap a number to jump. */
 @Composable
 fun DramaPlayer(v: Video, muted: Boolean, onClose: () -> Unit) {
-    val eps = if (v.episodes.isNotEmpty()) v.episodes else listOfNotNull(v.project)
+    val eps: List<Any> = if (v.episodes.isNotEmpty()) v.episodes else listOfNotNull(v.project)
     if (eps.isEmpty()) return
     val pager = rememberPagerState { eps.size }
     val scope = rememberCoroutineScope()
@@ -38,7 +38,7 @@ fun DramaPlayer(v: Video, muted: Boolean, onClose: () -> Unit) {
         Box(Modifier.fillMaxSize().background(Color.Black)) {
             VerticalPager(pager, Modifier.fillMaxSize()) { i ->
                 Box(Modifier.fillMaxSize()) {
-                    ProjectPlayer(eps[i], v.id * 100 + i, pager.currentPage == i, muted) { }
+                    ProjectPlayer(eps[i].toString(), v.id * 100 + i, pager.currentPage == i, muted) { }
                 }
             }
             Box(
