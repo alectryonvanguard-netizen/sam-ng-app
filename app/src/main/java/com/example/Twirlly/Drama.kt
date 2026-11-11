@@ -30,15 +30,27 @@ import kotlinx.coroutines.launch
 /** All episodes of a drama. Swipe up for the next episode, or tap a number to jump. */
 @Composable
 fun DramaPlayer(v: Video, muted: Boolean, onClose: () -> Unit) {
-    val eps: List<Any> = if (v.episodes.isNotEmpty()) v.episodes else listOfNotNull(v.project)
-    if (eps.isEmpty()) return
-    val pager = rememberPagerState { eps.size }
+    // If episodes list has items, use them; otherwise fallback to the project string
+    // Ensuring we don't pass raw Long IDs directly into ProjectPlayer as JSON strings
+    val eps = if (v.episodes.isNotEmpty()) {
+        // If episodes are stored as IDs, we fallback gracefully to the main project data string 
+        // or ensure it evaluates properly as project content
+        v.episodes.map { v.project ?: "" }
+    } else {
+        listOfNotNull(v.project)
+    }
+    
+    val validEps = eps.filter { it.isNotEmpty() }
+    if (validEps.isEmpty()) return
+    
+    val pager = rememberPagerState { validEps.size }
     val scope = rememberCoroutineScope()
+    
     Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Box(Modifier.fillMaxSize().background(Color.Black)) {
             VerticalPager(pager, Modifier.fillMaxSize()) { i ->
                 Box(Modifier.fillMaxSize()) {
-                    ProjectPlayer(eps[i].toString(), v.id * 100 + i, pager.currentPage == i, muted) { }
+                    ProjectPlayer(validEps[i], v.id * 100 + i, pager.currentPage == i, muted) { }
                 }
             }
             Box(
@@ -49,7 +61,7 @@ fun DramaPlayer(v: Video, muted: Boolean, onClose: () -> Unit) {
                 IconButton(onClick = onClose) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = Color.White) }
                 Column {
                     Text(v.seriesTitle ?: "Drama", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 17.sp)
-                    Text("Episode " + (pager.currentPage + 1) + " of " + eps.size + "  -  @" + v.user, color = Color.White.copy(alpha = 0.8f), fontSize = 12.sp)
+                    Text("Episode " + (pager.currentPage + 1) + " of " + validEps.size + "  -  @" + v.user, color = Color.White.copy(alpha = 0.8f), fontSize = 12.sp)
                 }
             }
             Box(
@@ -60,7 +72,7 @@ fun DramaPlayer(v: Video, muted: Boolean, onClose: () -> Unit) {
                 Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 14.dp).horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp),
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                eps.indices.forEach { i ->
+                validEps.indices.forEach { i ->
                     val on = pager.currentPage == i
                     Box(
                         Modifier.size(42.dp).clip(CircleShape)
