@@ -68,7 +68,8 @@ fun FeedScreen(vm: AppViewModel, onOpenProfile: () -> Unit, onUser: (Video) -> U
     val all by vm.videos.collectAsState()
     val following by vm.following.collectAsState()
     var forYou by remember { mutableStateOf(true) }
-    val list = if (forYou) all else all.filter { it.user in following }
+    val covers = all.filter { it.seriesId == null || it.episodeNo <= 1 }
+    val list = if (forYou) covers else covers.filter { it.user in following }
 
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         FeedPager(vm, list, 0, null, onOpenProfile, onUser, paused)
@@ -213,8 +214,11 @@ fun VideoPage(v: Video, active: Boolean, vm: AppViewModel, onUser: (Video) -> Un
     var showComments by remember { mutableStateOf(false) }
     var showShare by remember { mutableStateOf(false) }
     var progress by remember { mutableFloatStateOf(0f) }
-    var showDrama by remember { mutableStateOf(false) }
+    val vids by vm.videos.collectAsState()
+    val dramaOpen by vm.drama.collectAsState()
     val isDrama = v.seriesTitle != null
+    val sid = v.seriesId ?: v.id
+    val epCount = if (isDrama) vids.count { it.seriesId == sid } else 0
     val scope = rememberCoroutineScope()
     var pendingLike by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
     LaunchedEffect(heart) { if (heart) { delay(700); heart = false } }
@@ -223,7 +227,7 @@ fun VideoPage(v: Video, active: Boolean, vm: AppViewModel, onUser: (Video) -> Un
         Modifier.fillMaxSize().pointerInput(v.id) {
             detectTapGestures(
                 onTap = {
-                    if (isDrama && pendingLike?.isActive == true) { pendingLike?.cancel(); heart = false; showDrama = true }
+                    if (isDrama && pendingLike?.isActive == true) { pendingLike?.cancel(); heart = false; vm.openDrama(sid, maxOf(1, v.episodeNo)) }
                     else if (!v.isImage || isAlbum) paused = !paused
                 },
                 onDoubleTap = {
@@ -235,11 +239,11 @@ fun VideoPage(v: Video, active: Boolean, vm: AppViewModel, onUser: (Video) -> Un
         }
     ) {
         if (proj != null) {
-            ProjectPlayer(proj, v.id, active && !paused, settings.muted) { progress = it }
+            ProjectPlayer(proj, v.id, active && !paused && dramaOpen == null, settings.muted) { progress = it }
         } else if (v.isImage) {
             val pager = rememberPagerState { photos.size }
             LaunchedEffect(active, paused, photos.size) {
-                while (active && !paused && photos.size > 1) {
+                while (active && !paused && dramaOpen == null && photos.size > 1) {
                     delay(3000)
                     pager.animateScrollToPage((pager.currentPage + 1) % photos.size)
                 }
@@ -264,10 +268,10 @@ fun VideoPage(v: Video, active: Boolean, vm: AppViewModel, onUser: (Video) -> Un
                 }
             }
             if (audioPath != null) {
-                AudioLayer(mediaUri(audioPath), active && !paused && AppState.foreground, settings.muted)
+                AudioLayer(mediaUri(audioPath), active && !paused && dramaOpen == null && AppState.foreground, settings.muted)
             }
         } else {
-            PlayerLayer(v, active && !paused, settings.muted) { progress = it }
+            PlayerLayer(v, active && !paused && dramaOpen == null, settings.muted) { progress = it }
         }
         if (paused && (!v.isImage || isAlbum)) Icon(Icons.Default.PlayArrow, null, tint = Color.White.copy(alpha = .7f),
             modifier = Modifier.align(Alignment.Center).size(88.dp))
@@ -279,12 +283,12 @@ fun VideoPage(v: Video, active: Boolean, vm: AppViewModel, onUser: (Video) -> Un
             if (isDrama) {
                 Row(
                     Modifier.clip(RoundedCornerShape(50)).background(Brush.horizontalGradient(listOf(Color(0xFFFF2D87), Color(0xFF7B2FF7))))
-                        .clickable { showDrama = true }.padding(horizontal = 10.dp, vertical = 4.dp),
+                        .clickable { vm.openDrama(sid, maxOf(1, v.episodeNo)) }.padding(horizontal = 10.dp, vertical = 4.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Icon(Icons.Default.Movie, null, tint = Color.White, modifier = Modifier.size(14.dp))
                     Spacer(Modifier.width(5.dp))
-                    Text("DRAMA - " + maxOf(1, v.episodes.size) + " episodes - triple-tap", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    Text("DRAMA - " + maxOf(1, epCount) + " episodes - triple-tap", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                 }
                 Spacer(Modifier.height(6.dp))
             }
@@ -325,19 +329,6 @@ fun VideoPage(v: Video, active: Boolean, vm: AppViewModel, onUser: (Video) -> Un
     }
 
     if (showShare) ShareSheet(v, vm) { showShare = false }
-    
-    // Corrected DramaPlayer call matching its parameters
-    if (showDrama) {
-        DramaPlayer(
-            vm = vm,
-            v = v,
-            muted = settings.muted,
-            onToggleMute = { vm.updateSettings { it.copy(muted = !it.muted) } },
-            onNavigateTab = { tab -> /* handle navigation */ },
-            onClose = { showDrama = false }
-        )
-    }
-
     if (showComments) {
         ModalBottomSheet(onDismissRequest = { showComments = false }, containerColor = Color(0xFF1A1A1A)) {
             CommentsSheet(v, vm)
@@ -346,7 +337,7 @@ fun VideoPage(v: Video, active: Boolean, vm: AppViewModel, onUser: (Video) -> Un
 }
 
 @Composable
-private fun Action(icon: ImageVector, label: String, tint: Color, onClick: () -> Unit) {
+fun Action(icon: ImageVector, label: String, tint: Color, onClick: () -> Unit) {
     Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.clickable(onClick = onClick)) {
         Icon(icon, label, tint = tint, modifier = Modifier.size(32.dp))
         Text(label, color = Color.White, fontSize = 12.sp)
@@ -354,7 +345,7 @@ private fun Action(icon: ImageVector, label: String, tint: Color, onClick: () ->
 }
 
 @Composable
-private fun CommentsSheet(v: Video, vm: AppViewModel) {
+fun CommentsSheet(v: Video, vm: AppViewModel) {
     val profile by vm.profile.collectAsState()
     var text by remember { mutableStateOf("") }
     val words = wordCount(text)
