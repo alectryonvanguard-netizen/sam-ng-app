@@ -37,6 +37,13 @@ import coil.compose.AsyncImage
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.io.File
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.media3.common.MediaItem
+import androidx.media3.common.Player
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.PlayerView
 
 @Composable
 fun Avatar(path: String?, name: String, size: Dp, modifier: Modifier = Modifier) {
@@ -94,12 +101,8 @@ fun ProfileScreen(
                     Modifier.fillMaxWidth().height(160.dp + statusTop)
                         .background(Brush.verticalGradient(listOf(MaterialTheme.colorScheme.primary.copy(alpha = 0.8f), Color(0xFF1B1030))))
                 ) {
-                    if (bannerPath != null) {
-                        AsyncImage(
-                            model = mediaModel(bannerPath), contentDescription = "Banner",
-                            contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize()
-                        )
-                    }
+                    if (bannerPath != null) BannerMedia(bannerPath, profile.bannerVideo, Modifier.fillMaxSize())
+                    BannerFade(Modifier.align(Alignment.BottomCenter))
                     Box(
                         Modifier.fillMaxWidth().height(statusTop + 70.dp)
                             .background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.55f), Color.Transparent)))
@@ -188,8 +191,23 @@ fun EditProfileScreen(vm: AppViewModel, onBack: () -> Unit) {
     var bio by remember { mutableStateOf(profile.bio) }
     var priv by remember { mutableStateOf(profile.isPrivate) }
     var positioning by remember { mutableStateOf<Pair<Uri, Boolean>?>(null) }
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
     val pickBanner = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { u ->
-        if (u != null) positioning = Pair(u, true)
+        if (u != null) {
+            val isVideo = ctx.contentResolver.getType(u)?.startsWith("video") == true
+            if (!isVideo) positioning = Pair(u, true)
+            else scope.launch {
+                val d = withContext(Dispatchers.IO) { videoDuration(ctx, u.toString()) }
+                if (d < 5000L) {
+                    Toast.makeText(ctx, "Banner videos must be 5 to 10 seconds long", Toast.LENGTH_LONG).show()
+                } else {
+                    keepAccess(ctx, u)
+                    vm.setBannerVideo(u.toString())
+                    if (d > 10_500L) Toast.makeText(ctx, "Your banner will play the first 10 seconds", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
     }
     val pickAvatar = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { u ->
         if (u != null) positioning = Pair(u, false)
@@ -211,14 +229,10 @@ fun EditProfileScreen(vm: AppViewModel, onBack: () -> Unit) {
         }
         Box(
             Modifier.fillMaxWidth().height(130.dp).background(Color(0xFF2B2B3D))
-                .clickable { pickBanner.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }
+                .clickable { pickBanner.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)) }
         ) {
-            if (bannerPath != null) {
-                AsyncImage(
-                    model = mediaModel(bannerPath), contentDescription = "Banner",
-                    contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize()
-                )
-            }
+            if (bannerPath != null) BannerMedia(bannerPath, profile.bannerVideo, Modifier.fillMaxSize())
+            BannerFade(Modifier.align(Alignment.BottomCenter))
             Row(
                 Modifier.align(Alignment.Center).background(Color.Black.copy(alpha = .5f), CircleShape)
                     .padding(horizontal = 12.dp, vertical = 6.dp),
@@ -226,7 +240,7 @@ fun EditProfileScreen(vm: AppViewModel, onBack: () -> Unit) {
             ) {
                 Icon(Icons.Default.CameraAlt, null, tint = Color.White, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(6.dp))
-                Text("Change banner", color = Color.White, fontSize = 13.sp)
+                Text("Change banner (photo or 5-10 s video)", color = Color.White, fontSize = 13.sp)
             }
             Avatar(
                 profile.avatar, profile.name, 84.dp,
@@ -236,7 +250,7 @@ fun EditProfileScreen(vm: AppViewModel, onBack: () -> Unit) {
             )
         }
         Spacer(Modifier.height(54.dp))
-        Text("Tap the banner or the round photo to change them.", color = Color.Gray, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 16.dp))
+        Text("Tap the banner (photo or a 5 to 10 second video) or the round photo to change them.", color = Color.Gray, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 16.dp))
         Spacer(Modifier.height(12.dp))
         OutlinedTextField(
             value = displayName, onValueChange = { displayName = it.take(40) }, label = { Text("Name") },
@@ -273,4 +287,65 @@ fun EditProfileScreen(vm: AppViewModel, onBack: () -> Unit) {
             positioning = null
         }
     }
+}
+
+
+/** Banner: a photo, or a muted looping video of at most 10 seconds. Nothing is copied. */
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+@Composable
+fun BannerMedia(path: String, isVideo: Boolean, modifier: Modifier = Modifier) {
+    if (!isVideo) {
+        AsyncImage(model = mediaModel(path), contentDescription = "Banner", contentScale = ContentScale.Crop, modifier = modifier)
+        return
+    }
+    val ctx = LocalContext.current
+    val player = remember(path) {
+        ExoPlayer.Builder(ctx).build().apply {
+            val uri = if (path.startsWith("content:") || path.startsWith("http")) Uri.parse(path) else Uri.fromFile(File(path))
+            setMediaItem(
+                MediaItem.Builder().setUri(uri)
+                    .setClippingConfiguration(MediaItem.ClippingConfiguration.Builder().setEndPositionMs(10_000L).build())
+                    .build()
+            )
+            repeatMode = Player.REPEAT_MODE_ONE
+            volume = 0f
+            prepare()
+            playWhenReady = true
+        }
+    }
+    val owner = ctx as? androidx.lifecycle.LifecycleOwner
+    DisposableEffect(player) {
+        val obs = androidx.lifecycle.LifecycleEventObserver { _, e ->
+            if (e == androidx.lifecycle.Lifecycle.Event.ON_STOP) player.pause()
+            else if (e == androidx.lifecycle.Lifecycle.Event.ON_START) player.play()
+        }
+        owner?.lifecycle?.addObserver(obs)
+        onDispose { owner?.lifecycle?.removeObserver(obs); player.release() }
+    }
+    AndroidView(
+        factory = { c ->
+            PlayerView(c).apply {
+                useController = false
+                resizeMode = androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                this.player = player
+            }
+        },
+        modifier = modifier
+    )
+}
+
+/** Soft fade at the bottom of a banner into the page colour, so there is no hard line. */
+@Composable
+fun BannerFade(modifier: Modifier = Modifier) {
+    val bg = MaterialTheme.colorScheme.background
+    Box(
+        modifier.fillMaxWidth().height(130.dp).background(
+            Brush.verticalGradient(
+                0f to Color.Transparent,
+                0.45f to bg.copy(alpha = 0.35f),
+                0.8f to bg.copy(alpha = 0.85f),
+                1f to bg
+            )
+        )
+    )
 }
