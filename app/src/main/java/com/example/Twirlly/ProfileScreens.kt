@@ -37,6 +37,14 @@ import coil.compose.AsyncImage
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.io.File
+import android.view.LayoutInflater
+import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import androidx.compose.ui.viewinterop.AndroidView
@@ -101,7 +109,7 @@ fun ProfileScreen(
                     Modifier.fillMaxWidth().height(160.dp + statusTop)
                         .background(Brush.verticalGradient(listOf(MaterialTheme.colorScheme.primary.copy(alpha = 0.8f), Color(0xFF1B1030))))
                 ) {
-                    if (bannerPath != null) BannerMedia(bannerPath, profile.bannerVideo, Modifier.fillMaxSize())
+                    if (bannerPath != null) BannerMedia(bannerPath, profile.bannerVideo, Modifier.fillMaxSize(), profile.bannerStartMs, profile.bannerScale, profile.bannerOx, profile.bannerOy)
                     BannerFade(Modifier.align(Alignment.BottomCenter))
                     Box(
                         Modifier.fillMaxWidth().height(statusTop + 70.dp)
@@ -193,6 +201,7 @@ fun EditProfileScreen(vm: AppViewModel, onBack: () -> Unit) {
     var positioning by remember { mutableStateOf<Pair<Uri, Boolean>?>(null) }
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
+    var bannerPending by remember { mutableStateOf<Pair<String, Long>?>(null) }
     val pickBanner = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { u ->
         if (u != null) {
             val isVideo = ctx.contentResolver.getType(u)?.startsWith("video") == true
@@ -203,8 +212,7 @@ fun EditProfileScreen(vm: AppViewModel, onBack: () -> Unit) {
                     Toast.makeText(ctx, "Banner videos must be 5 to 10 seconds long", Toast.LENGTH_LONG).show()
                 } else {
                     keepAccess(ctx, u)
-                    vm.setBannerVideo(u.toString())
-                    if (d > 10_500L) Toast.makeText(ctx, "Your banner will play the first 10 seconds", Toast.LENGTH_LONG).show()
+                    bannerPending = Pair(u.toString(), d)
                 }
             }
         }
@@ -231,7 +239,7 @@ fun EditProfileScreen(vm: AppViewModel, onBack: () -> Unit) {
             Modifier.fillMaxWidth().height(130.dp).background(Color(0xFF2B2B3D))
                 .clickable { pickBanner.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)) }
         ) {
-            if (bannerPath != null) BannerMedia(bannerPath, profile.bannerVideo, Modifier.fillMaxSize())
+            if (bannerPath != null) BannerMedia(bannerPath, profile.bannerVideo, Modifier.fillMaxSize(), profile.bannerStartMs, profile.bannerScale, profile.bannerOx, profile.bannerOy)
             BannerFade(Modifier.align(Alignment.BottomCenter))
             Row(
                 Modifier.align(Alignment.Center).background(Color.Black.copy(alpha = .5f), CircleShape)
@@ -280,6 +288,12 @@ fun EditProfileScreen(vm: AppViewModel, onBack: () -> Unit) {
         Spacer(Modifier.height(24.dp))
     }
 
+    bannerPending?.let { bp ->
+        BannerVideoPositioner(bp.first, bp.second, onCancel = { bannerPending = null }) { st, sc, x, y ->
+            vm.setBannerVideo(bp.first, st, sc, x, y)
+            bannerPending = null
+        }
+    }
     val pos = positioning
     if (pos != null) {
         ImagePositioner(pos.first, pos.second, onCancel = { positioning = null }) { bytes ->
@@ -290,22 +304,20 @@ fun EditProfileScreen(vm: AppViewModel, onBack: () -> Unit) {
 }
 
 
-/** Banner: a photo, or a muted looping video of at most 10 seconds. Nothing is copied. */
+/** One looping, muted 10-second part of a video. Drawn as a normal view so it can be clipped and faded. */
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 @Composable
-fun BannerMedia(path: String, isVideo: Boolean, modifier: Modifier = Modifier) {
-    if (!isVideo) {
-        AsyncImage(model = mediaModel(path), contentDescription = "Banner", contentScale = ContentScale.Crop, modifier = modifier)
-        return
-    }
+private fun BannerVideoPlayer(path: String, startMs: Long, scale: Float, ox: Float, oy: Float, modifier: Modifier = Modifier) {
     val ctx = LocalContext.current
-    val player = remember(path) {
+    val player = remember(path, startMs) {
         ExoPlayer.Builder(ctx).build().apply {
-            val uri = if (path.startsWith("content:") || path.startsWith("http")) Uri.parse(path) else Uri.fromFile(File(path))
             setMediaItem(
-                MediaItem.Builder().setUri(uri)
-                    .setClippingConfiguration(MediaItem.ClippingConfiguration.Builder().setEndPositionMs(10_000L).build())
-                    .build()
+                MediaItem.Builder().setUri(mediaUri(path))
+                    .setClippingConfiguration(
+                        MediaItem.ClippingConfiguration.Builder()
+                            .setStartPositionMs(startMs)
+                            .setEndPositionMs(startMs + 10_000L).build()
+                    ).build()
             )
             repeatMode = Player.REPEAT_MODE_ONE
             volume = 0f
@@ -323,15 +335,92 @@ fun BannerMedia(path: String, isVideo: Boolean, modifier: Modifier = Modifier) {
         onDispose { owner?.lifecycle?.removeObserver(obs); player.release() }
     }
     AndroidView(
-        factory = { c ->
-            PlayerView(c).apply {
-                useController = false
-                resizeMode = androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_ZOOM
-                this.player = player
-            }
+        factory = { c -> LayoutInflater.from(c).inflate(R.layout.banner_player, null, false) as PlayerView },
+        update = { v ->
+            v.player = player
+            v.scaleX = scale
+            v.scaleY = scale
+            v.post { v.translationX = ox * v.width; v.translationY = oy * v.height }
         },
         modifier = modifier
     )
+}
+
+/**
+ * Banner: a photo, or a muted looping video of at most 10 seconds. Both are shown the same way:
+ * the picture is framed in a wide 2.5:1 area and centre-cropped to the banner, and the video never leaves the banner.
+ */
+@Composable
+fun BannerMedia(
+    path: String, isVideo: Boolean, modifier: Modifier = Modifier,
+    startMs: Long = 0L, scale: Float = 1f, ox: Float = 0f, oy: Float = 0f
+) {
+    if (!isVideo) {
+        AsyncImage(model = mediaModel(path), contentDescription = "Banner", contentScale = ContentScale.Crop, modifier = modifier)
+        return
+    }
+    BoxWithConstraints(modifier.clipToBounds()) {
+        val vw = maxOf(maxWidth.value, maxHeight.value * 2.5f)
+        val vh = vw / 2.5f
+        Box(Modifier.align(Alignment.Center).requiredSize(vw.dp, vh.dp)) {
+            BannerVideoPlayer(path, startMs, scale, ox, oy, Modifier.fillMaxSize())
+        }
+    }
+}
+
+/** Choose the part of the video (when it is longer than 10 s) and where it sits in the banner, like for a photo. */
+@Composable
+fun BannerVideoPositioner(uri: String, durationMs: Long, onCancel: () -> Unit, onDone: (Long, Float, Float, Float) -> Unit) {
+    var scale by remember { mutableFloatStateOf(1f) }
+    var ox by remember { mutableFloatStateOf(0f) }
+    var oy by remember { mutableFloatStateOf(0f) }
+    var start by remember { mutableFloatStateOf(0f) }
+    var applied by remember { mutableLongStateOf(0L) }
+    var frameW by remember { mutableFloatStateOf(1f) }
+    var frameH by remember { mutableFloatStateOf(1f) }
+    val maxStart = (durationMs - 10_000L).coerceAtLeast(0L)
+
+    Dialog(onDismissRequest = onCancel, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+            Column(Modifier.fillMaxSize().systemBarsPadding().padding(16.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(onClick = onCancel) { Text("Cancel") }
+                    Text("Banner video", Modifier.weight(1f), textAlign = TextAlign.Center, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                    TextButton(onClick = { onDone(applied, scale, ox, oy) }) { Text("Done") }
+                }
+                Spacer(Modifier.height(16.dp))
+                Box(
+                    Modifier.fillMaxWidth().aspectRatio(2.5f).clip(RoundedCornerShape(12.dp))
+                        .onSizeChanged { frameW = it.width.toFloat(); frameH = it.height.toFloat() }
+                ) {
+                    BannerMedia(uri, true, Modifier.fillMaxSize(), applied, scale, ox, oy)
+                    Box(
+                        Modifier.fillMaxSize().pointerInput(Unit) {
+                            detectTransformGestures { _, pan, zoom, _ ->
+                                scale = (scale * zoom).coerceIn(1f, 3f)
+                                val lim = (scale - 1f) / 2f
+                                ox = (ox + pan.x / frameW).coerceIn(-lim, lim)
+                                oy = (oy + pan.y / frameH).coerceIn(-lim, lim)
+                            }
+                        }
+                    )
+                }
+                Spacer(Modifier.height(10.dp))
+                Text("Drag to move the video and pinch to zoom, like a photo.", color = Color.Gray, fontSize = 13.sp)
+                Spacer(Modifier.height(18.dp))
+                if (maxStart > 500L) {
+                    Text("Choose the part of the video: starts at " + timeStr(start.toLong()) + " (plays 10 seconds)", fontSize = 14.sp)
+                    Slider(
+                        value = start, onValueChange = { start = it },
+                        onValueChangeFinished = { applied = start.toLong() },
+                        valueRange = 0f..maxStart.toFloat()
+                    )
+                } else {
+                    Text("Your video is " + timeStr(durationMs) + " long. The whole video will play.", fontSize = 14.sp)
+                }
+            }
+        }
+    }
 }
 
 /** Soft fade at the bottom of a banner into the page colour, so there is no hard line. */
