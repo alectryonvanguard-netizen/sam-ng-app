@@ -417,7 +417,7 @@ private fun Timeline(
 }
 
 @Composable
-private fun PostDetails(thumb: String?, suggested: List<String>, dramas: List<Pair<Long, String>>, premium: Boolean, onNeedPremium: () -> Unit, onBack: () -> Unit, onPost: (String, SeriesChoice?) -> Unit) {
+private fun PostDetails(thumb: String?, clipCount: Int, suggested: List<String>, dramas: List<Pair<Long, String>>, premium: Boolean, onNeedPremium: () -> Unit, onBack: () -> Unit, onPost: (String, SeriesChoice?) -> Unit) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     var busy by remember { mutableStateOf(false) }
@@ -426,6 +426,7 @@ private fun PostDetails(thumb: String?, suggested: List<String>, dramas: List<Pa
     var dramaMode by remember { mutableIntStateOf(0) }
     var dramaTitle by remember { mutableStateOf("") }
     var dramaTarget by remember { mutableStateOf<Long?>(null) }
+    var splitEps by remember { mutableStateOf(false) }
     val tags = remember { mutableStateListOf<String>() }
     fun addTag(raw: String) {
         val w = raw.trim().trimStart('#').replace(Regex("[^\\p{L}\\p{N}_]"), "")
@@ -498,12 +499,21 @@ private fun PostDetails(thumb: String?, suggested: List<String>, dramas: List<Pa
                         modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
                     )
                 }
+                if (clipCount > 1 && (dramaMode == 1 || dramaTarget != null)) {
+                    Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Each clip is its own episode")
+                            Text("$clipCount episodes are added at once", fontSize = 12.sp, color = Color.Gray)
+                        }
+                        Switch(checked = splitEps, onCheckedChange = { splitEps = it })
+                    }
+                }
                 Spacer(Modifier.height(24.dp))
                 Button(
                     onClick = {
                         val choice = when {
-                            dramaTarget != null -> SeriesChoice(addToId = dramaTarget)
-                            dramaMode == 1 && dramaTitle.isNotBlank() -> SeriesChoice(newTitle = dramaTitle)
+                            dramaTarget != null -> SeriesChoice(addToId = dramaTarget, splitClips = splitEps)
+                            dramaMode == 1 && dramaTitle.isNotBlank() -> SeriesChoice(newTitle = dramaTitle, splitClips = splitEps)
                             else -> null
                         }
                         onPost((desc.trim() + " " + tags.joinToString(" ")).trim(), choice)
@@ -1360,7 +1370,7 @@ private fun EditorBody(vm: AppViewModel, uris: List<Uri>, onClose: () -> Unit, o
                 .entries.sortedByDescending { it.value }.take(8).map { it.key }
         }
         val suggested = (trending + listOf("#fyp", "#viral", "#foryou", "#trending", "#edit")).distinct().take(12)
-        PostDetails(project.clips.firstOrNull()?.path, suggested, vids.filter { it.local && it.seriesTitle != null }.map { it.id to (it.seriesTitle ?: "") }, premium, onNeedPremium = { premiumPrompt = true }, onBack = { showPost = false }) { cap, choice ->
+        PostDetails(project.clips.firstOrNull()?.path, project.clips.size, suggested, vids.filter { it.local && it.seriesTitle != null && it.episodeNo <= 1 }.map { it.id to (it.seriesTitle ?: "") }, premium, onNeedPremium = { premiumPrompt = true }, onBack = { showPost = false }) { cap, choice ->
             showPost = false
             val used = project.files().toSet()
             imported.filter { it !in used }.forEach { File(it).delete() }
