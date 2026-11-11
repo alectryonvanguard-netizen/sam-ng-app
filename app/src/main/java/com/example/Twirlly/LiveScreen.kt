@@ -180,11 +180,32 @@ private fun effectLocked(i: Int) = i >= 4 && i < 14 || i >= 16
 private val TOPICS = listOf("Chat", "Music", "Gaming", "Anime", "Learning", "Fashion", "Comedy")
 
 private class Gift(val emoji: String, val name: String, val coins: Int, val big: Boolean = false)
-private val GIFT_LIST = listOf(
-    Gift("🌹", "Rose", 1), Gift("🍙", "Onigiri", 10), Gift("❤️", "Heart", 5), Gift("🧸", "Teddy", 20),
-    Gift("🍰", "Cake", 50), Gift("🌸", "Sakura storm", 88, true), Gift("💍", "Ring", 99), Gift("🎡", "Ferris wheel", 199, true),
-    Gift("⛩️", "Torii gate", 250, true), Gift("🚀", "Rocket", 299, true), Gift("🗡️", "Katana", 399, true), Gift("👑", "Crown", 499, true),
-    Gift("🐉", "Dragon", 999, true), Gift("🏰", "Castle", 1999, true)
+
+private val GIFT_TABS: List<Pair<String, List<Gift>>> = listOf(
+    "Popular" to listOf(
+        Gift("🌹", "Rose", 1), Gift("⭐", "Star", 2), Gift("❤️", "Heart", 5), Gift("🍭", "Lollipop", 8),
+        Gift("🍙", "Onigiri", 10), Gift("🍦", "Ice cream", 12), Gift("🔥", "Fire", 15), Gift("☕", "Coffee", 15),
+        Gift("🍕", "Pizza", 18), Gift("🧸", "Teddy", 20), Gift("🎈", "Balloon", 25), Gift("🧋", "Boba tea", 30),
+        Gift("⚡", "Lightning", 35), Gift("🎉", "Confetti", 40), Gift("🍰", "Cake", 50), Gift("🎤", "Microphone", 60)
+    ),
+    "Anime" to listOf(
+        Gift("🍡", "Dango", 25), Gift("🍜", "Ramen", 30), Gift("🐱", "Lucky cat", 45), Gift("🎴", "Hanafuda", 55),
+        Gift("🌸", "Sakura storm", 88, true), Gift("🦊", "Fox spirit", 120, true), Gift("🏮", "Lantern", 150, true), Gift("👘", "Kimono", 199, true),
+        Gift("⛩️", "Torii gate", 250, true), Gift("🗡️", "Katana", 399, true), Gift("🎌", "Festival", 450, true), Gift("🐉", "Dragon", 999, true)
+    ),
+    "Love" to listOf(
+        Gift("💋", "Kiss", 12), Gift("💌", "Love letter", 30), Gift("💐", "Bouquet", 40), Gift("💕", "Two hearts", 66),
+        Gift("💍", "Ring", 99, true), Gift("💖", "Heart rain", 200, true), Gift("🕊️", "Doves", 260, true), Gift("💒", "Wedding", 888, true)
+    ),
+    "Fun" to listOf(
+        Gift("🎮", "Game pad", 70), Gift("🎸", "Guitar", 90), Gift("🏆", "Trophy", 120, true), Gift("🎆", "Fireworks", 150, true),
+        Gift("🌈", "Rainbow", 160, true), Gift("🎡", "Ferris wheel", 199, true), Gift("🦄", "Unicorn", 450, true), Gift("🎪", "Circus", 600, true)
+    ),
+    "Luxury" to listOf(
+        Gift("💎", "Diamond", 299, true), Gift("🚀", "Rocket", 299, true), Gift("👑", "Crown", 499, true), Gift("💰", "Treasure", 699, true),
+        Gift("🏎️", "Sports car", 799, true), Gift("🛥️", "Yacht", 1299, true), Gift("✈️", "Private jet", 1599, true), Gift("🏰", "Castle", 1999, true),
+        Gift("🪐", "Planet", 2999, true), Gift("🌌", "Galaxy", 4999, true)
+    )
 )
 
 private class CoinPack(val coins: Int, val price: String, val note: String? = null)
@@ -517,7 +538,8 @@ fun LiveScreen(vm: AppViewModel, preview: Boolean, onClose: () -> Unit) {
     var premiumAsk by remember { mutableStateOf(false) }
     var chatInput by remember { mutableStateOf("") }
     var pinned by remember { mutableStateOf<LiveMsg?>(null) }
-    var selectedGift by remember { mutableStateOf(GIFT_LIST[0]) }
+    var selectedGift by remember { mutableStateOf(GIFT_TABS[0].second[0]) }
+    var giftTab by remember { mutableIntStateOf(0) }
     val messages = remember { mutableStateListOf<LiveMsg>() }
     val floaters = remember { mutableStateListOf<Floater>() }
     val bursts = remember { mutableStateListOf<Burst>() }
@@ -799,8 +821,18 @@ fun LiveScreen(vm: AppViewModel, preview: Boolean, onClose: () -> Unit) {
                             ) { Text("Get coins", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp) }
                         }
                         Spacer(Modifier.height(10.dp))
-                        LazyVerticalGrid(GridCells.Fixed(4), Modifier.height(260.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            gridItems(GIFT_LIST) { g ->
+                        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            GIFT_TABS.forEachIndexed { i, (n, _) ->
+                                Box(
+                                    Modifier.clip(RoundedCornerShape(50))
+                                        .background(if (giftTab == i) BRAND_GRADIENT else Brush.horizontalGradient(listOf(Color.White.copy(alpha = 0.1f), Color.White.copy(alpha = 0.1f))))
+                                        .clickable { giftTab = i }.padding(horizontal = 16.dp, vertical = 7.dp)
+                                ) { Text(n, color = Color.White, fontWeight = FontWeight.Medium) }
+                            }
+                        }
+                        Spacer(Modifier.height(10.dp))
+                        LazyVerticalGrid(GridCells.Fixed(4), Modifier.height(280.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            gridItems(GIFT_TABS[giftTab].second) { g ->
                                 Column(
                                     Modifier.clip(RoundedCornerShape(16.dp))
                                         .background(if (selectedGift === g) Color.White.copy(alpha = 0.16f) else Color.Transparent)
