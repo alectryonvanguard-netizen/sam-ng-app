@@ -40,6 +40,7 @@ fun UserProfileScreen(vm: AppViewModel, name: String, onBack: () -> Unit, onOpen
             item(span = { GridItemSpan(maxLineSpan) }) {
                 Column(Modifier.fillMaxWidth()) {
                     Box(Modifier.fillMaxWidth().height(150.dp + statusTop).background(Brush.verticalGradient(listOf(c1, c2)))) {
+                        BannerFade(Modifier.align(Alignment.BottomCenter))
                         Avatar(
                             null, name, 84.dp,
                             Modifier.align(Alignment.BottomStart).offset(x = 16.dp, y = 42.dp)
