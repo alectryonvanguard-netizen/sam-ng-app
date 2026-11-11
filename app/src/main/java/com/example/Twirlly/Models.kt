@@ -22,11 +22,6 @@ data class Comment(
 
 fun wordCount(s: String): Int = s.trim().split(Regex("\\s+")).count { it.isNotEmpty() }
 
-data class SeriesChoice(
-    val addToId: Long? = null,
-    val newTitle: String? = null
-)
-
 data class Video(
     val id: Long,
     val url: String,
@@ -45,8 +40,21 @@ data class Video(
     val audio: String? = null,
     val project: String? = null,
     val seriesTitle: String? = null,
-    val episodes: List<Long> = emptyList()
+    val seriesId: Long? = null,
+    val episodeNo: Int = 0
 )
+
+/** How a new post is added: as a single post, as a new drama, or as the next episode of one of your dramas. */
+class SeriesChoice(val newTitle: String? = null, val addToId: Long? = null, val splitClips: Boolean = false)
+
+const val WEEK_MS = 7L * 24 * 60 * 60 * 1000
+
+/** Whole days left before a name or username can change again (0 = can change now). */
+fun cooldownDaysLeft(changedAt: Long): Int {
+    if (changedAt <= 0L) return 0
+    val left = WEEK_MS - (System.currentTimeMillis() - changedAt)
+    return if (left <= 0L) 0 else ((left + 86_399_999L) / 86_400_000L).toInt()
+}
 
 data class Profile(
     val name: String = "creator",
@@ -59,22 +67,24 @@ data class Profile(
     val bannerScale: Float = 1f,
     val bannerOx: Float = 0f,
     val bannerOy: Float = 0f,
+    val nameChangedAt: Long = 0L,
+    val usernameChangedAt: Long = 0L,
     val isPrivate: Boolean = false
 )
 
-const val MAX_OWN_POSTS = 40
+const val MAX_OWN_POSTS = 100
 const val STORAGE_LIMIT = 5_000_000L
 
 data class AppSettings(
     val email: String = "",
+    val coins: Int = 0,
     val notifications: Boolean = true,
     val autoplay: Boolean = true,
     val muted: Boolean = false,
     val theme: Int = 0,
     val accent: Int = 0,
     val onboarded: Boolean = false,
-    val premium: Boolean = false,
-    val coins: Int = 100
+    val premium: Boolean = false
 )
 
 data class ActivityEvent(val id: Long, val text: String, val time: Long, val type: Int = 0, val videoId: Long = 0L, val sys: Boolean = true)
@@ -89,13 +99,12 @@ private fun Video.toJson(): JSONObject = JSONObject().apply {
         }
     })
     put("images", JSONArray(images)); put("audio", audio ?: ""); put("project", project ?: "")
-    put("seriesTitle", seriesTitle ?: ""); put("episodes", JSONArray(episodes))
+    put("ser", seriesTitle ?: ""); put("sid", seriesId ?: 0L); put("epn", episodeNo)
 }
 
 private fun JSONObject.toVideo(): Video {
     val cs = optJSONArray("comments") ?: JSONArray()
     val imgs = optJSONArray("images") ?: JSONArray()
-    val eps = optJSONArray("episodes") ?: JSONArray()
     return Video(
         id = getLong("id"), url = getString("url"), isImage = optBoolean("img"), local = optBoolean("local"),
         user = getString("user"), caption = getString("cap"), music = optString("music"), likes = optInt("likes"),
@@ -108,8 +117,9 @@ private fun JSONObject.toVideo(): Video {
         images = (0 until imgs.length()).map { imgs.getString(it) },
         audio = optString("audio", "").takeIf { it.isNotBlank() },
         project = optString("project", "").takeIf { it.isNotBlank() },
-        seriesTitle = optString("seriesTitle", "").takeIf { it.isNotBlank() },
-        episodes = (0 until eps.length()).map { eps.getLong(it) }
+        seriesTitle = optString("ser", "").takeIf { it.isNotBlank() },
+        seriesId = optLong("sid", 0L).takeIf { it != 0L },
+        episodeNo = optInt("epn", 0)
     )
 }
 
@@ -129,6 +139,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     val settings: StateFlow<AppSettings> = _settings.asStateFlow()
     private val _events = MutableStateFlow<List<ActivityEvent>>(emptyList())
     val events: StateFlow<List<ActivityEvent>> = _events.asStateFlow()
+    private val _drama = MutableStateFlow<Pair<Long, Int>?>(null)
+    /** The drama that is open (series id and the episode to start on), or null. */
+    val drama: StateFlow<Pair<Long, Int>?> = _drama.asStateFlow()
+    fun openDrama(seriesId: Long, episode: Int) { _drama.value = Pair(seriesId, episode) }
+    fun closeDrama() { _drama.value = null }
 
     init {
         load()
@@ -170,6 +185,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     bannerScale = p.optDouble("bsc", 1.0).toFloat(),
                     bannerOx = p.optDouble("box", 0.0).toFloat(),
                     bannerOy = p.optDouble("boy", 0.0).toFloat(),
+                    nameChangedAt = p.optLong("nca", 0L),
+                    usernameChangedAt = p.optLong("uca", 0L),
                     isPrivate = p.optBoolean("private")
                 )
             }
@@ -177,8 +194,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 _settings.value = AppSettings(
                     notifications = s.optBoolean("notif", true), autoplay = s.optBoolean("auto", true),
                     muted = s.optBoolean("muted", false), theme = s.optInt("theme", 0), accent = s.optInt("accent", 0),
-                    onboarded = s.optBoolean("onb", false), premium = s.optBoolean("prem", false), email = s.optString("email", ""),
-                    coins = s.optInt("coins", 100)
+                    onboarded = s.optBoolean("onb", false), premium = s.optBoolean("prem", false), email = s.optString("email", ""), coins = s.optInt("coins", 0)
                 )
             }
             val ev = o.optJSONArray("events") ?: JSONArray()
@@ -196,7 +212,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         put("following", JSONArray(_following.value.toList()))
         val p = _profile.value
         put("profile", JSONObject().put("name", p.name).put("dn", p.displayName).put("bio", p.bio)
-            .put("avatar", p.avatar ?: "").put("banner", p.banner ?: "").put("bv", p.bannerVideo).put("bs", p.bannerStartMs).put("bsc", p.bannerScale.toDouble()).put("box", p.bannerOx.toDouble()).put("boy", p.bannerOy.toDouble()).put("private", p.isPrivate))
+            .put("avatar", p.avatar ?: "").put("banner", p.banner ?: "").put("bv", p.bannerVideo).put("bs", p.bannerStartMs).put("bsc", p.bannerScale.toDouble()).put("box", p.bannerOx.toDouble()).put("boy", p.bannerOy.toDouble()).put("nca", p.nameChangedAt).put("uca", p.usernameChangedAt).put("private", p.isPrivate))
         val s = _settings.value
         put("settings", JSONObject().put("notif", s.notifications).put("auto", s.autoplay).put("muted", s.muted)
             .put("theme", s.theme).put("accent", s.accent).put("onb", s.onboarded).put("prem", s.premium).put("email", s.email).put("coins", s.coins))
@@ -277,68 +293,76 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         persist()
     }
 
-    fun postProject(p: Project, caption: String, seriesChoice: SeriesChoice? = null, onDone: () -> Unit) {
+    fun postProject(p: Project, caption: String, series: SeriesChoice? = null, onDone: () -> Unit) {
         if (p.clips.isEmpty()) return
         val me = _profile.value.name
-        val newVideoId = System.currentTimeMillis()
-        val v = Video(
-            id = newVideoId, url = p.clips[0].path, isImage = false, local = true, user = me,
-            caption = caption.ifBlank { "My new edit" },
-            music = p.audios.firstOrNull()?.name?.ifBlank { "Added song" } ?: "Original sound - $me",
-            likes = 0, createdAt = System.currentTimeMillis(), project = p.toJson(),
-            seriesTitle = seriesChoice?.newTitle
-        )
-        
+        val now = System.currentTimeMillis()
+        val target = series?.addToId?.let { id -> _videos.value.firstOrNull { it.id == id && it.local } }
+        val title = target?.seriesTitle ?: series?.newTitle?.trim()?.takeIf { it.isNotEmpty() }?.take(60)
+        val sid: Long? = if (title == null) null else (target?.seriesId ?: target?.id ?: now)
+        val firstNo = if (sid != null && target != null) _videos.value.count { it.seriesId == sid } + 1 else 1
+        // many episodes at once: every clip becomes its own episode
+        val parts: List<Project> =
+            if (title != null && series?.splitClips == true && p.clips.size > 1)
+                p.clips.map { c -> p.copy(clips = listOf(c.copy(trans = 0)), layers = emptyList(), fx = emptyList(), audios = emptyList()) }
+            else listOf(p)
+        val made = parts.mapIndexed { i, proj ->
+            Video(
+                id = now + i, url = proj.clips[0].path, isImage = false, local = true, user = me,
+                caption = caption.ifBlank { if (title != null) "Episode " + (firstNo + i) else "My new edit" },
+                music = proj.audios.firstOrNull()?.name?.ifBlank { "Added song" } ?: "Original sound - $me",
+                likes = 0, createdAt = now + i, project = proj.toJson(),
+                seriesTitle = title, seriesId = sid, episodeNo = if (sid != null) firstNo + i else 0
+            )
+        }
+        // limited storage: only links to your gallery are kept, and only the newest posts
         _videos.update { cur ->
-            var list = cur
-            if (seriesChoice?.addToId != null) {
-                list = list.map { vid ->
-                    if (vid.id == seriesChoice.addToId) {
-                        vid.copy(episodes = vid.episodes + newVideoId)
-                    } else vid
-                }
-            }
-            val all = listOf(v) + list
+            val all = made.reversed() + cur
             val keep = all.filter { it.local }.take(MAX_OWN_POSTS).map { it.id }.toSet()
             all.filter { !it.local || it.id in keep }
         }
-        addEvent("Your edit was posted", 6, v.id)
+        addEvent(
+            when {
+                title == null -> "Your edit was posted"
+                made.size > 1 -> made.size.toString() + " episodes of \"" + title + "\" were posted"
+                target != null -> "Episode " + firstNo + " added to \"" + title + "\""
+                else -> "Your drama \"" + title + "\" was posted"
+            }, 6, made.first().id
+        )
         persist()
         if (_settings.value.notifications) Notifier.send(ctx, "Posted on Twirlly", "Your edit is live on your profile.")
         onDone()
     }
 
-    fun spendCoins(amount: Int): Boolean {
-        var success = false
-        _settings.update { s ->
-            if (s.coins >= amount) {
-                success = true
-                s.copy(coins = s.coins - amount)
-            } else s
-        }
-        persist()
-        return success
-    }
-
-    fun addCoins(amount: Int) {
-        _settings.update { it.copy(coins = it.coins + amount) }
-        persist()
-    }
-
     fun deletePost(id: Long) {
         val v = _videos.value.firstOrNull { it.id == id } ?: return
-        _videos.update { l -> l.filter { it.id != id } }
+        // deleting the first episode removes the whole drama
+        _videos.update { l -> l.filter { it.id != id && !(v.seriesId == v.id && it.seriesId == v.id) } }
         addEvent("Post deleted")
         persist()
     }
 
     /** Name and username. The username is unique (it cannot match a creator in the app) and changes everywhere at once. */
-    fun saveProfile(displayName: String, username: String, bio: String, isPrivate: Boolean): String? {
+    fun saveProfile(displayName: String, username: String, bio: String, isPrivate: Boolean, onboarding: Boolean = false): String? {
         val n = username.trim().lowercase()
         if (!Regex("^[a-z0-9_.]{3,24}$").matches(n)) return "Username must be 3 to 24 letters, numbers, _ or ."
         if (DemoContent.creators.any { it.name == n }) return "That username is already taken."
         val old = _profile.value
-        _profile.value = old.copy(name = n, displayName = displayName.trim().take(40), bio = bio.trim().take(200), isPrivate = isPrivate)
+        val newDisplay = displayName.trim().take(40)
+        val nameChanged = newDisplay != old.displayName
+        val userChanged = n != old.name
+        if (!onboarding) {
+            val nd = cooldownDaysLeft(old.nameChangedAt)
+            val ud = cooldownDaysLeft(old.usernameChangedAt)
+            if (nameChanged && nd > 0) return "You can change your name again in $nd day" + (if (nd == 1) "." else "s.")
+            if (userChanged && ud > 0) return "You can change your username again in $ud day" + (if (ud == 1) "." else "s.")
+        }
+        val now = System.currentTimeMillis()
+        _profile.value = old.copy(
+            name = n, displayName = newDisplay, bio = bio.trim().take(200), isPrivate = isPrivate,
+            nameChangedAt = if (nameChanged && !onboarding) now else old.nameChangedAt,
+            usernameChangedAt = if (userChanged && !onboarding) now else old.usernameChangedAt
+        )
         if (n != old.name) {
             _videos.update { l ->
                 l.map { v ->
@@ -382,6 +406,19 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         persist()
     }
 
+    /** Test coins. Real purchases will be connected later. */
+    fun addCoins(n: Int) {
+        _settings.update { it.copy(coins = it.coins + n) }
+        persist()
+    }
+
+    fun spendCoins(n: Int): Boolean {
+        if (_settings.value.coins < n) return false
+        _settings.update { it.copy(coins = it.coins - n) }
+        persist()
+        return true
+    }
+
     fun updateSettings(f: (AppSettings) -> AppSettings) {
         _settings.update(f)
         persist()
@@ -394,7 +431,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun completeOnboarding(displayName: String, username: String): String? {
-        val err = saveProfile(displayName, username, _profile.value.bio, false)
+        val err = saveProfile(displayName, username, _profile.value.bio, false, onboarding = true)
         if (err != null) return err
         _settings.update { it.copy(onboarded = true) }
         persist()
