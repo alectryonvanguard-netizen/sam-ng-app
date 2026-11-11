@@ -36,7 +36,7 @@ import kotlinx.coroutines.launch
 
 /** Dedicated Drama Player with top header showing series title and back arrow navigation. */
 @Composable
-fun DramaPlayer(v: Video, muted: Boolean, onToggleMute: () -> Unit, onClose: () -> Unit) {
+fun DramaPlayer(v: Video, muted: Boolean, onToggleMute: () -> Unit = {}, onClose: () -> Unit) {
     val eps = if (v.episodes.isNotEmpty()) {
         v.episodes.map { v.project ?: "" }
     } else {
