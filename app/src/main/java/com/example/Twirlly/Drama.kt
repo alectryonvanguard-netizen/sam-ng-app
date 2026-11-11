@@ -1,4 +1,4 @@
-package com.example.Twirlly
+package com.example.twirlly
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
