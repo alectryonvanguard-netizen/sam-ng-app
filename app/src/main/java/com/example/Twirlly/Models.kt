@@ -1,4 +1,4 @@
-Package com.example.twirlly
+package com.example.twirlly
 
 import android.app.Application
 import android.widget.Toast
