@@ -202,12 +202,7 @@ fun TwirllyApp(vm: AppViewModel) {
                     val list = o.ids.mapNotNull { id -> videos.firstOrNull { it.id == id } }
                     FeedPager(vm, list, o.start, { overlay = o.back }, null, openUser)
                 }
-                is Overlay.Editor -> EditorScreen(
-                    vm = vm,
-                    uris = o.uris,
-                    draft = o.draft,
-                    onClose = { overlay = null }
-                ) {
+                is Overlay.Editor -> EditorScreen(vm, o.uris, o.draft, onClose = { overlay = null }) {
                     overlay = null
                     tab = 0
                 }
