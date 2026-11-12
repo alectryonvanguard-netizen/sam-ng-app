@@ -17,7 +17,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlin.math.sqrt
 
-private class Badge(val emoji: String, val name: String, val how: String, val earned: Boolean)
+private class BadgeItem(val emoji: String, val name: String, val how: String, val earned: Boolean)
 private class Challenge(val title: String, val have: Int, val goal: Int)
 
 /** Level, streak, badges and weekly challenges. Everything is worked out from what you did in the app. */
@@ -49,16 +49,16 @@ fun RewardsDialog(vm: AppViewModel, onDismiss: () -> Unit) {
         Challenge("Follow 2 creators", count(5), 2)
     )
     val badges = listOf(
-        Badge("🎬", "First post", "Post something", posts >= 1),
-        Badge("✨", "Creator", "Post 10 times", posts >= 10),
-        Badge("🎭", "Drama maker", "Post a drama", mine.any { it.seriesTitle != null }),
-        Badge("📖", "Storyteller", "Post a story", events.any { it.text.contains("story") }),
-        Badge("🔥", "On fire", "7-day streak", settings.bestStreak >= 7),
-        Badge("🤝", "Friendly", "Follow 3 creators", following.size >= 3),
-        Badge("❤️", "Fan", "Like 10 posts", videos.count { it.liked } >= 10),
-        Badge("🔖", "Collector", "Save 5 posts", videos.count { it.saved } >= 5),
-        Badge("⭐", "Premium", "Go Premium", settings.premium),
-        Badge("✅", "Verified", "Get verified", profile.verified)
+        BadgeItem("🎬", "First post", "Post something", posts >= 1),
+        BadgeItem("✨", "Creator", "Post 10 times", posts >= 10),
+        BadgeItem("🎭", "Drama maker", "Post a drama", mine.any { it.seriesTitle != null }),
+        BadgeItem("📖", "Storyteller", "Post a story", events.any { it.text.contains("story") }),
+        BadgeItem("🔥", "On fire", "7-day streak", settings.bestStreak >= 7),
+        BadgeItem("🤝", "Friendly", "Follow 3 creators", following.size >= 3),
+        BadgeItem("❤️", "Fan", "Like 10 posts", videos.count { it.liked } >= 10),
+        BadgeItem("🔖", "Collector", "Save 5 posts", videos.count { it.saved } >= 5),
+        BadgeItem("⭐", "Premium", "Go Premium", settings.premium),
+        BadgeItem("✅", "Verified", "Get verified", profile.verified)
     )
     val brand = Brush.horizontalGradient(listOf(Color(0xFFFF2D87), Color(0xFF7B2FF7)))
 
