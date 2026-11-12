@@ -220,6 +220,7 @@ fun VideoPage(v: Video, active: Boolean, vm: AppViewModel, onUser: (Video) -> Un
     val isDrama = v.seriesTitle != null
     val sid = v.seriesId ?: v.id
     val epCount = if (isDrama) vids.count { it.seriesId == sid } else 0
+    val totalMs = remember(v.project) { try { v.project?.let { projectFromJson(it).totalMs() } ?: 0L } catch (e: Exception) { 0L } }
     val scope = rememberCoroutineScope()
     var pendingLike by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
     LaunchedEffect(heart) { if (heart) { delay(700); heart = false } }
@@ -322,6 +323,7 @@ fun VideoPage(v: Video, active: Boolean, vm: AppViewModel, onUser: (Video) -> Un
             Action(Icons.Default.Share, fmt(v.shares), Color.White) { showShare = true }
         }
 
+        EndMark(progress, totalMs, Modifier.align(Alignment.TopStart).statusBarsPadding().padding(start = 16.dp, top = 60.dp))
         if (!v.isImage) LinearProgressIndicator(
             progress = { progress },
             modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(2.dp),
