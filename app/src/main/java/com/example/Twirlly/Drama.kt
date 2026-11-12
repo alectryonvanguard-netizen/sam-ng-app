@@ -1,22 +1,26 @@
 package com.example.twirlly
 
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.scaleIn
+import android.text.format.DateUtils
+import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.itemsIndexed
-import androidx.compose.foundation.pager.VerticalPager
-import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -26,230 +30,218 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import coil.compose.AsyncImage
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
+import java.io.File
 
-private val PURPLE = Color(0xFFB44CFF)
-
-/**
- * A drama: every episode is a normal video with its own likes, comments, saves and shares.
- * Swipe up for the next episode, it moves on by itself when one ends, and the episode button jumps to any episode.
- */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun DramaScreen(vm: AppViewModel, seriesId: Long, startEp: Int, onBack: () -> Unit) {
-    val all by vm.videos.collectAsState()
-    val settings by vm.settings.collectAsState()
-    val profile by vm.profile.collectAsState()
-    val breakOn by vm.breakDue.collectAsState()
-    val eps = all.filter { it.seriesId == seriesId }.sortedBy { it.episodeNo }
-    if (eps.isEmpty()) {
-        LaunchedEffect(Unit) { onBack() }
-        return
+fun PostCard(v: Video, modifier: Modifier = Modifier, onClick: () -> Unit = {}, onLong: (() -> Unit)? = null) {
+    val ctx = LocalContext.current
+    val colors = listOf(Color(0xFF6A11CB), Color(0xFF2575FC), Color(0xFFFF2D87), Color(0xFF11998E), Color(0xFFFF8008))
+    val c = colors[(v.id % colors.size).toInt()]
+    Box(
+        modifier.aspectRatio(.75f).clip(RoundedCornerShape(6.dp))
+            .background(Brush.verticalGradient(listOf(c, Color.Black)))
+            .pointerInput(v.id) {
+                detectTapGestures(onTap = { onClick() }, onLongPress = { onLong?.invoke() })
+            }
+    ) {
+        if (v.local) {
+            AsyncImage(
+                model = mediaModel(v.url), imageLoader = Thumbs.loader(ctx), contentDescription = null,
+                contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize()
+            )
+        }
+        if (v.images.size > 1) {
+            Icon(Icons.Default.PhotoLibrary, null, tint = Color.White,
+                modifier = Modifier.align(Alignment.TopEnd).padding(5.dp).size(18.dp))
+        } else if (!v.isImage) {
+            Icon(Icons.Default.PlayArrow, null, tint = Color.White.copy(.8f),
+                modifier = Modifier.align(if (v.local) Alignment.TopEnd else Alignment.Center).size(if (v.local) 22.dp else 40.dp))
+        }
+        if (v.audio != null) {
+            Icon(Icons.Default.MusicNote, null, tint = Color.White,
+                modifier = Modifier.align(Alignment.TopStart).padding(5.dp).size(16.dp))
+        }
+        Column(Modifier.align(Alignment.BottomStart).padding(6.dp)) {
+            Text(v.caption, color = Color.White, fontSize = 11.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.Favorite, null, tint = Color.White, modifier = Modifier.size(11.dp))
+                Text(" ${fmt(v.likes)}", color = Color.White, fontSize = 11.sp)
+            }
+        }
     }
-    val startIndex = remember { eps.indexOfFirst { it.episodeNo == startEp }.coerceAtLeast(0) }
-    val pager = rememberPagerState(initialPage = startIndex) { eps.size }
-    val scope = rememberCoroutineScope()
-    var paused by remember { mutableStateOf(false) }
-    var heart by remember { mutableStateOf(false) }
-    var progress by remember { mutableFloatStateOf(0f) }
-    var advancedFrom by remember { mutableIntStateOf(-1) }
-    var cd by remember { mutableIntStateOf(0) }
-    var cdJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
-    var jumpOpen by remember { mutableStateOf(false) }
-    var commentsId by remember { mutableStateOf<Long?>(null) }
-    var shareId by remember { mutableStateOf<Long?>(null) }
-    val cur = eps[pager.currentPage.coerceIn(0, eps.size - 1)]
-    val sheetOpen = jumpOpen || commentsId != null || shareId != null
-    val title = cur.seriesTitle ?: "Drama"
-    val verified = !cur.local || profile.verified
+}
 
-    LaunchedEffect(pager.currentPage) {
-        cdJob?.cancel(); cd = 0
-        advancedFrom = -1; progress = 0f; paused = false
-        vm.setLastEpisode(seriesId, eps[pager.currentPage.coerceIn(0, eps.size - 1)].episodeNo)
+@Composable
+fun DiscoverScreen(vm: AppViewModel, onUser: (String) -> Unit = {}, onOpen: (List<Long>, Int) -> Unit) {
+    val videos by vm.videos.collectAsState()
+    val following by vm.following.collectAsState()
+    var q by remember { mutableStateOf("") }
+    val tags = remember(videos) {
+        Regex("#\\w+").findAll(videos.joinToString(" ") { it.caption })
+            .map { it.value.lowercase() }.groupingBy { it }.eachCount()
+            .entries.sortedByDescending { it.value }.take(10).map { it.key }
     }
-    LaunchedEffect(heart) { if (heart) { delay(700); heart = false } }
+    val creators = DemoContent.creators
+    val results = videos.filter { !it.story && (it.seriesId == null || it.episodeNo <= 1) && (q.isBlank() || it.caption.contains(q, true) || it.user.contains(q, true)) }
 
-    Box(Modifier.fillMaxSize().background(Color.Black)) {
-        VerticalPager(pager, Modifier.fillMaxSize()) { i ->
-            val e = eps[i]
-            Box(
-                Modifier.fillMaxSize().pointerInput(e.id) {
-                    detectTapGestures(
-                        onTap = { paused = !paused },
-                        onDoubleTap = { vm.doubleTapLike(e.id); heart = true }
-                    )
-                }
-            ) {
-                val proj = e.project
-                if (proj != null) {
-                    ProjectPlayer(proj, e.id, pager.currentPage == i && !paused && !sheetOpen && !breakOn && cd == 0 && AppState.foreground, settings.muted) { p ->
-                        if (pager.currentPage == i) {
-                            progress = p
-                            // one finished: the next episode comes
-                            if (p >= 0.985f && i < eps.size - 1 && advancedFrom != i) {
-                                advancedFrom = i
-                                cd = 3
-                                cdJob = scope.launch {
-                                    while (cd > 0) { delay(1000); cd-- }
-                                    pager.animateScrollToPage(i + 1)
-                                }
-                            }
-                        }
+    Column(Modifier.fillMaxSize().statusBarsPadding().padding(12.dp)) {
+        OutlinedTextField(
+            q, { q = it }, Modifier.fillMaxWidth(), singleLine = true,
+            placeholder = { Text("Search videos or creators") },
+            leadingIcon = { Icon(Icons.Default.Search, null) }, shape = CircleShape
+        )
+        Spacer(Modifier.height(8.dp))
+        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            items(tags) { t -> AssistChip(onClick = { q = t }, label = { Text(t) }) }
+        }
+        Spacer(Modifier.height(8.dp))
+        Text("Creators", fontWeight = FontWeight.Bold)
+        LazyRow(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+            items(creators) { c ->
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Avatar(null, c.name, 56.dp, Modifier.clickable { onUser(c.name) })
+                    Text(c.display, fontSize = 11.sp, maxLines = 1)
+                    TextButton(onClick = { vm.toggleFollow(c.name) }) {
+                        Text(if (c.name in following) "Following" else "Follow", fontSize = 12.sp)
                     }
                 }
             }
         }
-
-        if (paused) Icon(
-            Icons.Default.PlayArrow, null, tint = Color.White.copy(alpha = .7f),
-            modifier = Modifier.align(Alignment.Center).size(88.dp)
-        )
-        AnimatedVisibility(heart, Modifier.align(Alignment.Center), enter = scaleIn(), exit = fadeOut()) {
-            Icon(Icons.Default.Favorite, null, tint = Color(0xFFFF2D87), modifier = Modifier.size(110.dp))
-        }
-
-        if (cd > 0) {
-            Row(
-                Modifier.align(Alignment.Center).clip(RoundedCornerShape(50)).background(Color.Black.copy(alpha = 0.6f))
-                    .clickable {
-                        cdJob?.cancel(); cd = 0
-                        val next = pager.currentPage + 1
-                        scope.launch { pager.animateScrollToPage(next) }
-                    }.padding(horizontal = 18.dp, vertical = 12.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Icon(Icons.Default.PlayArrow, null, tint = Color.White)
-                Spacer(Modifier.width(8.dp))
-                Text("Next episode in $cd  -  tap to skip", color = Color.White, fontWeight = FontWeight.Bold)
+        if (results.isEmpty()) Text("No results", color = Color.Gray, modifier = Modifier.padding(16.dp))
+        LazyVerticalGrid(
+            GridCells.Fixed(2), Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            items(results, key = { it.id }) { v ->
+                PostCard(v, onClick = { onOpen(results.map { it.id }, results.indexOf(v)) })
             }
         }
+    }
+}
 
-        // top: back arrow, title, sound
-        Box(
-            Modifier.align(Alignment.TopCenter).fillMaxWidth().height(140.dp)
-                .background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.6f), Color.Transparent)))
-        )
-        Box(Modifier.align(Alignment.TopCenter).fillMaxWidth().statusBarsPadding().padding(horizontal = 6.dp, vertical = 6.dp)) {
-            IconButton(onClick = onBack, modifier = Modifier.align(Alignment.CenterStart)) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = Color.White, modifier = Modifier.size(30.dp))
+private fun eventStyle(type: Int): Pair<ImageVector, Color> = when (type) {
+    1 -> Icons.Default.Favorite to Color(0xFFFF2D87)
+    2 -> Icons.Default.ChatBubble to Color(0xFF00C8E0)
+    3 -> Icons.Default.Bookmark to Color(0xFFFFC107)
+    4 -> Icons.Default.Share to Color(0xFF4CAF50)
+    5 -> Icons.Default.Person to Color(0xFF8E6BBF)
+    6 -> Icons.Default.CloudUpload to Color(0xFFFF8A00)
+    7 -> Icons.Default.AccountCircle to Color(0xFF8E6BBF)
+    8 -> Icons.Default.Star to Color(0xFFFFC107)
+    else -> Icons.Default.Notifications to Color(0xFF666666)
+}
+
+@Composable
+private fun EventRow(e: ActivityEvent, videos: List<Video>, onOpen: (List<Long>, Int) -> Unit) {
+    val ctx = LocalContext.current
+    val v = if (e.videoId != 0L) videos.firstOrNull { it.id == e.videoId } else null
+    val (icon, col) = eventStyle(e.type)
+    val who = if (e.text.startsWith("@")) e.text.substringBefore(" ") else ""
+    Row(
+        Modifier.fillMaxWidth().clickable(enabled = v != null) { onOpen(listOf(e.videoId), 0) }
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(contentAlignment = Alignment.BottomEnd) {
+            Box(Modifier.size(48.dp).clip(CircleShape).background(col.copy(alpha = 0.85f)), contentAlignment = Alignment.Center) {
+                if (who.length > 1 && !e.sys) Text(who[1].uppercase(), color = Color.White, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                else Icon(icon, null, tint = Color.White)
             }
-            Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
-                Text("Drama", color = Color.White, fontSize = 26.sp, fontWeight = FontWeight.Bold)
-                Box(
-                    Modifier.padding(top = 2.dp).width(96.dp).height(3.dp).clip(CircleShape)
-                        .background(Brush.horizontalGradient(listOf(Color(0xFF7B2FF7), PURPLE)))
-                )
-            }
-            IconButton(onClick = { vm.updateSettings { it.copy(muted = !it.muted) } }, modifier = Modifier.align(Alignment.CenterEnd)) {
-                Icon(if (settings.muted) Icons.Default.VolumeOff else Icons.Default.VolumeUp, "Sound", tint = Color.White, modifier = Modifier.size(30.dp))
+            if (!e.sys) Box(Modifier.size(18.dp).clip(CircleShape).background(col), contentAlignment = Alignment.Center) {
+                Icon(icon, null, tint = Color.White, modifier = Modifier.size(11.dp))
             }
         }
-
-        // bottom: details
-        Box(
-            Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(420.dp)
-                .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.78f))))
-        )
-        Column(Modifier.align(Alignment.BottomStart).padding(start = 14.dp, bottom = 10.dp, end = 84.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Avatar(
-                    if (cur.local) profile.avatar else null, cur.user, 56.dp,
-                    Modifier.border(2.dp, Brush.linearGradient(listOf(Color(0xFF7B2FF7), PURPLE)), CircleShape)
-                )
-                Spacer(Modifier.width(12.dp))
-                Text("@" + cur.user, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 20.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                if (verified) {
-                    Spacer(Modifier.width(6.dp))
-                    Icon(Icons.Default.Verified, "Verified", tint = Color(0xFF1D9BF0), modifier = Modifier.size(24.dp))
-                }
-            }
-            Spacer(Modifier.height(10.dp))
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f)) {
             Text(
                 buildAnnotatedString {
-                    withStyle(SpanStyle(color = PURPLE, fontWeight = FontWeight.Bold)) { append("[ ") }
-                    withStyle(SpanStyle(color = Color.White, fontWeight = FontWeight.Bold)) { append(title.uppercase()) }
-                    withStyle(SpanStyle(color = PURPLE, fontWeight = FontWeight.Bold)) { append(" ]") }
+                    if (who.isNotEmpty()) {
+                        withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { append(who) }
+                        append(e.text.removePrefix(who))
+                    } else append(e.text)
                 },
-                fontSize = 26.sp, maxLines = 2, overflow = TextOverflow.Ellipsis
+                maxLines = 2, overflow = TextOverflow.Ellipsis
             )
+            Text(DateUtils.getRelativeTimeSpanString(e.time).toString(), color = Color.Gray, fontSize = 12.sp)
+        }
+        if (v != null && v.local) {
+            AsyncImage(
+                model = mediaModel(v.url), imageLoader = Thumbs.loader(ctx), contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.size(width = 40.dp, height = 54.dp).clip(RoundedCornerShape(6.dp))
+            )
+        }
+    }
+}
+
+@Composable
+fun InboxScreen(vm: AppViewModel, onOpen: (List<Long>, Int) -> Unit) {
+    val events by vm.events.collectAsState()
+    val videos by vm.videos.collectAsState()
+    var folder by remember { mutableStateOf(false) }
+    BackHandler(enabled = folder) { folder = false }
+    val social = events.filter { !it.sys }
+    val system = events.filter { it.sys }
+
+    if (folder) {
+        Column(Modifier.fillMaxSize().statusBarsPadding()) {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(4.dp)) {
+                IconButton(onClick = { folder = false }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
+                Text("Activity", fontSize = 22.sp, fontWeight = FontWeight.Bold)
+            }
+            Text(
+                "Profile changes, uploads and system messages are kept here.",
+                color = Color.Gray, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+            )
+            if (system.isEmpty()) Text("Nothing here yet.", color = Color.Gray, modifier = Modifier.padding(16.dp))
+            LazyColumn { items(system, key = { it.id }) { e -> EventRow(e, videos, onOpen) } }
+        }
+    } else {
+        Column(Modifier.fillMaxSize().statusBarsPadding()) {
+            Text("Inbox", fontSize = 26.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(16.dp))
             Row(
-                Modifier.padding(vertical = 6.dp).clip(RoundedCornerShape(50)).clickable { jumpOpen = true }.padding(end = 10.dp),
+                Modifier.fillMaxWidth().clickable { folder = true }.padding(horizontal = 16.dp, vertical = 10.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Icon(Icons.Default.PlayArrow, null, tint = Color.White, modifier = Modifier.size(32.dp))
-                Spacer(Modifier.width(8.dp))
-                Text("Episode " + cur.episodeNo + " of " + eps.size, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 20.sp)
-                Spacer(Modifier.width(6.dp))
-                Icon(Icons.Default.ExpandLess, "Jump to an episode", tint = Color.White, modifier = Modifier.size(22.dp))
-            }
-            Text("\u201C" + cur.caption + "\u201D", color = Color.White, fontSize = 17.sp, maxLines = 4, overflow = TextOverflow.Ellipsis)
-            HorizontalDivider(Modifier.padding(top = 10.dp), color = Color.White.copy(alpha = 0.3f))
-            Row(Modifier.padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Default.MusicNote, null, tint = Color.White, modifier = Modifier.size(24.dp))
-                Spacer(Modifier.width(10.dp))
-                Text(cur.music, color = Color.White, fontSize = 17.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            }
-            HorizontalDivider(color = Color.White.copy(alpha = 0.3f))
-        }
-
-        // right rail: every button belongs to the episode you are watching
-        Column(
-            Modifier.align(Alignment.BottomEnd).padding(end = 10.dp, bottom = 120.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(16.dp)
-        ) {
-            Avatar(if (cur.local) profile.avatar else null, cur.user, 48.dp)
-            Action(Icons.Default.Favorite, fmt(cur.likes), if (cur.liked) Color(0xFFFF2D87) else Color.White) { vm.toggleLike(cur.id) }
-            Action(Icons.Default.ChatBubble, fmt(cur.comments.size), Color.White) { commentsId = cur.id }
-            Action(Icons.Default.Bookmark, "", if (cur.saved) Color(0xFFFFC107) else Color.White) { vm.toggleSave(cur.id) }
-            Action(Icons.Default.Link, "", Color.White) { shareId = cur.id }
-        }
-
-        LinearProgressIndicator(
-            progress = { progress },
-            modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(2.dp),
-            color = Color.White, trackColor = Color.White.copy(alpha = .2f)
-        )
-    }
-
-    if (jumpOpen) {
-        ModalBottomSheet(onDismissRequest = { jumpOpen = false }, containerColor = Color(0xFF14141C)) {
-            Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 16.dp).padding(bottom = 16.dp)) {
-                Text("Episodes (" + eps.size + ")", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 18.sp)
-                Text("Tap a number to jump to that episode.", color = Color.Gray, fontSize = 12.sp)
-                Spacer(Modifier.height(12.dp))
-                LazyVerticalGrid(GridCells.Fixed(3), Modifier.heightIn(max = 420.dp), verticalArrangement = Arrangement.spacedBy(8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    itemsIndexed(eps) { idx, e ->
-                        val on = idx == pager.currentPage
-                        Box(
-                            Modifier.clip(RoundedCornerShape(12.dp))
-                                .then(if (on) Modifier.border(2.dp, Color(0xFFFF2D87), RoundedCornerShape(12.dp)) else Modifier)
-                        ) {
-                            PostCard(e, Modifier.fillMaxWidth(), onClick = { jumpOpen = false; scope.launch { pager.animateScrollToPage(idx) } })
-                            Text(
-                                "EP " + e.episodeNo, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.sp,
-                                modifier = Modifier.align(Alignment.TopStart).padding(6.dp).clip(RoundedCornerShape(50))
-                                    .background(if (on) Color(0xFFFF2D87) else Color.Black.copy(alpha = 0.6f)).padding(horizontal = 8.dp, vertical = 2.dp)
-                            )
-                        }
+                Box(
+                    Modifier.size(52.dp).clip(RoundedCornerShape(16.dp))
+                        .background(Brush.linearGradient(listOf(Color(0xFFFF2D87), Color(0xFFFF8A00)))),
+                    contentAlignment = Alignment.Center
+                ) { Icon(Icons.Default.Notifications, null, tint = Color.White, modifier = Modifier.size(28.dp)) }
+                Spacer(Modifier.width(14.dp))
+                Column(Modifier.weight(1f)) {
+                    Text("Activity", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                    Text(
+                        system.firstOrNull()?.text ?: "Profile changes and system messages",
+                        color = Color.Gray, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis
+                    )
+                }
+                if (system.isNotEmpty()) {
+                    Box(Modifier.clip(CircleShape).background(Color(0xFFFF2D87)).padding(horizontal = 8.dp, vertical = 2.dp)) {
+                        Text(minOf(system.size, 99).toString(), color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                     }
+                    Spacer(Modifier.width(6.dp))
+                }
+                Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null, tint = Color.Gray)
+            }
+            HorizontalDivider(Modifier.padding(vertical = 6.dp))
+            Text("Notifications", color = Color.Gray, fontSize = 13.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
+            if (social.isEmpty()) {
+                Column(Modifier.fillMaxWidth().padding(32.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(Icons.Default.FavoriteBorder, null, tint = Color.Gray, modifier = Modifier.size(44.dp))
+                    Spacer(Modifier.height(8.dp))
+                    Text("When someone likes, comments or follows you, it shows up here.", color = Color.Gray, fontSize = 13.sp)
                 }
             }
+            LazyColumn { items(social, key = { it.id }) { e -> EventRow(e, videos, onOpen) } }
         }
     }
-    commentsId?.let { id ->
-        eps.firstOrNull { it.id == id }?.let { e ->
-            ModalBottomSheet(onDismissRequest = { commentsId = null }, containerColor = Color(0xFF1A1A1A)) { CommentsSheet(e, vm) }
-        }
-    }
-    shareId?.let { id -> eps.firstOrNull { it.id == id }?.let { e -> ShareSheet(e, vm) { shareId = null } } }
 }
