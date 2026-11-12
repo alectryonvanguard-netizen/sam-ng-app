@@ -179,11 +179,7 @@ fun TwirllyApp(vm: AppViewModel) {
         Box(Modifier.padding(pad).fillMaxSize()) {
             when (tab) {
                 0 -> FeedScreen(vm, { tab = 4 }, openUser, overlay != null)
-                1 -> DiscoverScreen(
-                    vm = vm,
-                    onUser = { username -> overlay = Overlay.User(username) },
-                    onOpen = { ids, start -> overlay = Overlay.Viewer(ids, start) }
-                )
+                1 -> DiscoverScreen(vm, onUser = { overlay = Overlay.User(it) }) { ids, start -> overlay = Overlay.Viewer(ids, start) }
                 2 -> Unit
                 3 -> InboxScreen(vm) { ids, start -> overlay = Overlay.Viewer(ids, start) }
                 else -> ProfileScreen(
