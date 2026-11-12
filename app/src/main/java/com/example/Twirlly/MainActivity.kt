@@ -1,4 +1,4 @@
-Package com.example.twirlly
+package com.example.twirlly
 
 import android.Manifest
 import android.content.Intent
