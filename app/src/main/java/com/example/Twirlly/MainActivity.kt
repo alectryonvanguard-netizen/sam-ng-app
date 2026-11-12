@@ -1,3 +1,4 @@
+
 package com.example.twirlly
 
 import android.Manifest
@@ -198,10 +199,15 @@ fun TwirllyApp(vm: AppViewModel) {
                     val list = o.ids.mapNotNull { id -> videos.firstOrNull { it.id == id } }
                     FeedPager(vm, list, o.start, { overlay = o.back }, null, openUser)
                 }
-                is Overlay.Editor -> EditorScreen(vm, o.uris, o.draft, onClose = { overlay = null }) {
-                    overlay = null
-                    tab = 0
-                }
+                is Overlay.Editor -> EditorScreen(
+                    vm = vm,
+                    uris = o.uris,
+                    onClose = { overlay = null },
+                    onPosted = {
+                        overlay = null
+                        tab = 0
+                    }
+                )
                 is Overlay.User -> UserProfileScreen(vm, o.name, onBack = { overlay = null }) { ids, start ->
                     overlay = Overlay.Viewer(ids, start, o)
                 }
