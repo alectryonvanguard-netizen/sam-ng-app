@@ -9,6 +9,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
@@ -86,7 +87,8 @@ fun ProfileScreen(
     onSettings: () -> Unit,
     onEdit: () -> Unit,
     onOpen: (List<Long>, Int) -> Unit,
-    onLive: () -> Unit
+    onLive: () -> Unit,
+    onDraft: (String) -> Unit = {}
 ) {
     val videos by vm.videos.collectAsState()
     val profile by vm.profile.collectAsState()
@@ -94,8 +96,20 @@ fun ProfileScreen(
     val settings by vm.settings.collectAsState()
     var tab by remember { mutableIntStateOf(0) }
     var deleteId by remember { mutableStateOf<Long?>(null) }
-    val mine = videos.filter { it.local && (it.seriesId == null || it.episodeNo <= 1) }
-    val shown = when (tab) { 0 -> mine; 1 -> videos.filter { it.liked }; else -> videos.filter { it.saved } }
+    val drafts by vm.drafts.collectAsState()
+    val playlists by vm.playlists.collectAsState()
+    var playlist by remember { mutableStateOf<String?>(null) }
+    var addTo by remember { mutableStateOf<Video?>(null) }
+    var newPlaylistOpen by remember { mutableStateOf(false) }
+    var rewardsOpen by remember { mutableStateOf(false) }
+    val myStories = videos.filter { it.local && it.story }
+    val mine = videos.filter { it.local && !it.story && (it.seriesId == null || it.episodeNo <= 1) }
+    val shown = when (tab) {
+        0 -> mine
+        1 -> videos.filter { it.liked }
+        2 -> videos.filter { it.saved && (playlist == null || it.id in (playlists[playlist] ?: emptyList())) }
+        else -> emptyList()
+    }
     val statusTop = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
     val bannerPath = profile.banner
 
@@ -118,16 +132,20 @@ fun ProfileScreen(
                     IconButton(onClick = onSettings, modifier = Modifier.align(Alignment.TopEnd).padding(top = statusTop)) {
                         Icon(Icons.Default.Settings, "Settings", tint = Color.White)
                     }
+                    val ring = if (myStories.isNotEmpty()) Brush.linearGradient(listOf(Color(0xFFFF2D87), Color(0xFF7B2FF7), Color(0xFF3D5AFE)))
+                        else Brush.linearGradient(listOf(MaterialTheme.colorScheme.background, MaterialTheme.colorScheme.background))
                     Avatar(
                         profile.avatar, profile.name, 88.dp,
                         Modifier.align(Alignment.BottomStart).offset(x = 16.dp, y = 44.dp)
-                            .border(3.dp, MaterialTheme.colorScheme.background, CircleShape)
+                            .border(if (myStories.isNotEmpty()) 4.dp else 3.dp, ring, CircleShape)
+                            .clickable(enabled = myStories.isNotEmpty()) { onOpen(myStories.map { it.id }, 0) }
                     )
                 }
                 Row(
                     Modifier.fillMaxWidth().height(54.dp).padding(horizontal = 16.dp),
                     horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically
                 ) {
+                    IconButton(onClick = { rewardsOpen = true }) { Icon(Icons.Default.EmojiEvents, "Rewards", tint = Color(0xFFFFC107)) }
                     Button(onClick = onLive, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFF2D87))) {
                         Icon(Icons.Default.Videocam, null, Modifier.size(18.dp))
                         Spacer(Modifier.width(6.dp))
@@ -139,6 +157,10 @@ fun ProfileScreen(
                 Column(Modifier.padding(horizontal = 16.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(profile.displayName.ifBlank { profile.name }, fontWeight = FontWeight.Bold, fontSize = 22.sp)
+                        if (profile.verified) {
+                            Spacer(Modifier.width(6.dp))
+                            Icon(Icons.Default.Verified, "Verified", tint = Color(0xFF1D9BF0), modifier = Modifier.size(20.dp))
+                        }
                         if (settings.premium) {
                             Spacer(Modifier.width(6.dp))
                             Icon(Icons.Default.Star, "Premium", tint = Color(0xFFFFC107), modifier = Modifier.size(20.dp))
@@ -162,11 +184,21 @@ fun ProfileScreen(
                     Spacer(Modifier.height(10.dp))
                 }
                 TabRow(selectedTabIndex = tab, containerColor = Color.Transparent) {
-                    listOf("Posts", "Liked", "Saved").forEachIndexed { i, t ->
+                    listOf("Posts", "Liked", "Saved", "Drafts").forEachIndexed { i, t ->
                         Tab(selected = tab == i, onClick = { tab = i }, text = { Text(t) })
                     }
                 }
-                if (shown.isEmpty()) {
+                if (tab == 2) {
+                    Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FilterChip(selected = playlist == null, onClick = { playlist = null }, label = { Text("All saved") })
+                        playlists.keys.forEach { n -> FilterChip(selected = playlist == n, onClick = { playlist = n }, label = { Text(n) }) }
+                        AssistChip(onClick = { newPlaylistOpen = true }, label = { Text("+ New playlist") })
+                    }
+                    if (playlist != null) TextButton(onClick = { vm.deletePlaylist(playlist!!); playlist = null }, modifier = Modifier.padding(start = 8.dp)) { Text("Delete this playlist") }
+                    Text("Touch and hold a saved post to add it to a playlist.", color = Color.Gray, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 16.dp))
+                }
+                if (tab == 3 && drafts.isEmpty()) Text("No drafts yet. In the editor, tap Save draft to finish later.", color = Color.Gray, modifier = Modifier.padding(24.dp))
+                if (shown.isEmpty() && tab != 3) {
                     Text(
                         when (tab) { 0 -> "Tap + to create your first post."; 1 -> "Posts you like appear here."; else -> "Saved posts appear here." },
                         color = Color.Gray, modifier = Modifier.padding(24.dp)
@@ -175,10 +207,41 @@ fun ProfileScreen(
             }
         }
         items(shown, key = { it.id }) { v ->
-            PostCard(v, onClick = { onOpen(shown.map { it.id }, shown.indexOf(v)) }, onLong = if (tab == 0) ({ deleteId = v.id }) else null)
+            PostCard(v, onClick = { onOpen(shown.map { it.id }, shown.indexOf(v)) }, onLong = if (tab == 0) ({ deleteId = v.id }) else if (tab == 2) ({ addTo = v }) else null)
+        }
+        if (tab == 3) items(drafts, key = { it.id }, span = { GridItemSpan(maxLineSpan) }) { d ->
+            DraftRow(d, onOpen = { onDraft(d.json) }, onDelete = { vm.deleteDraft(d.id) })
         }
     }
 
+    if (rewardsOpen) RewardsDialog(vm) { rewardsOpen = false }
+    if (newPlaylistOpen) {
+        var name by remember { mutableStateOf("") }
+        AlertDialog(
+            onDismissRequest = { newPlaylistOpen = false },
+            title = { Text("New playlist") },
+            text = { OutlinedTextField(name, { name = it.take(30) }, singleLine = true, label = { Text("Name") }) },
+            confirmButton = { TextButton(onClick = { vm.createPlaylist(name); newPlaylistOpen = false }) { Text("Create") } },
+            dismissButton = { TextButton(onClick = { newPlaylistOpen = false }) { Text("Cancel") } }
+        )
+    }
+    addTo?.let { v ->
+        AlertDialog(
+            onDismissRequest = { addTo = null },
+            title = { Text("Add to playlist") },
+            text = {
+                Column {
+                    if (playlists.isEmpty()) Text("Make a playlist first with + New playlist.")
+                    playlists.forEach { (n, ids) ->
+                        TextButton(onClick = { if (v.id in ids) vm.removeFromPlaylist(n, v.id) else vm.addToPlaylist(n, v.id); addTo = null }) {
+                            Text((if (v.id in ids) "Remove from " else "Add to ") + n)
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { addTo = null }) { Text("Close") } }
+        )
+    }
     deleteId?.let { id ->
         AlertDialog(
             onDismissRequest = { deleteId = null },
@@ -445,4 +508,26 @@ fun BannerFade(modifier: Modifier = Modifier) {
             )
         )
     )
+}
+
+
+@Composable
+private fun DraftRow(d: Draft, onOpen: () -> Unit, onDelete: () -> Unit) {
+    val first = remember(d.json) { try { projectFromJson(d.json).clips.firstOrNull()?.path } catch (e: Exception) { null } }
+    val whenText = remember(d.savedAt) { java.text.SimpleDateFormat("d MMM, HH:mm", java.util.Locale.getDefault()).format(java.util.Date(d.savedAt)) }
+    Row(
+        Modifier.fillMaxWidth().clickable(onClick = onOpen).padding(horizontal = 16.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(Modifier.size(56.dp, 80.dp).clip(RoundedCornerShape(10.dp)).background(Color(0xFF2B2B3D))) {
+            if (first != null) AsyncImage(model = mediaModel(first), contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+        }
+        Spacer(Modifier.width(14.dp))
+        Column(Modifier.weight(1f)) {
+            Text(d.title, fontWeight = FontWeight.Bold)
+            Text("Saved $whenText", color = Color.Gray, fontSize = 12.sp)
+            Text("Tap to continue editing", color = Color(0xFFFF2D87), fontSize = 12.sp)
+        }
+        IconButton(onClick = onDelete) { Icon(Icons.Default.Delete, "Delete draft", tint = Color.Gray) }
+    }
 }
