@@ -41,11 +41,14 @@ data class Video(
     val project: String? = null,
     val seriesTitle: String? = null,
     val seriesId: Long? = null,
-    val episodeNo: Int = 0
+    val episodeNo: Int = 0,
+    val story: Boolean = false
 )
 
+data class Draft(val id: Long, val title: String, val json: String, val savedAt: Long)
+
 /** How a new post is added: as a single post, as a new drama, or as the next episode of one of your dramas. */
-class SeriesChoice(val newTitle: String? = null, val addToId: Long? = null, val splitClips: Boolean = false)
+class SeriesChoice(val newTitle: String? = null, val addToId: Long? = null, val splitClips: Boolean = false, val story: Boolean = false)
 
 const val WEEK_MS = 7L * 24 * 60 * 60 * 1000
 
@@ -67,6 +70,8 @@ data class Profile(
     val bannerScale: Float = 1f,
     val bannerOx: Float = 0f,
     val bannerOy: Float = 0f,
+    val verified: Boolean = false,
+    val verifyRequest: String = "",
     val nameChangedAt: Long = 0L,
     val usernameChangedAt: Long = 0L,
     val isPrivate: Boolean = false
@@ -78,6 +83,14 @@ const val STORAGE_LIMIT = 5_000_000L
 data class AppSettings(
     val email: String = "",
     val breakHours: Int = 2,
+    val kidsMode: Boolean = false,
+    val pinHash: String = "",
+    val bedtimeOn: Boolean = false,
+    val bedStart: Int = 22,
+    val bedEnd: Int = 6,
+    val streak: Int = 0,
+    val bestStreak: Int = 0,
+    val lastDay: Long = 0L,
     val coins: Int = 0,
     val notifications: Boolean = true,
     val autoplay: Boolean = true,
@@ -100,7 +113,7 @@ private fun Video.toJson(): JSONObject = JSONObject().apply {
         }
     })
     put("images", JSONArray(images)); put("audio", audio ?: ""); put("project", project ?: "")
-    put("ser", seriesTitle ?: ""); put("sid", seriesId ?: 0L); put("epn", episodeNo)
+    put("ser", seriesTitle ?: ""); put("sid", seriesId ?: 0L); put("epn", episodeNo); put("story", story)
 }
 
 private fun JSONObject.toVideo(): Video {
@@ -120,7 +133,8 @@ private fun JSONObject.toVideo(): Video {
         project = optString("project", "").takeIf { it.isNotBlank() },
         seriesTitle = optString("ser", "").takeIf { it.isNotBlank() },
         seriesId = optLong("sid", 0L).takeIf { it != 0L },
-        episodeNo = optInt("epn", 0)
+        episodeNo = optInt("epn", 0),
+        story = optBoolean("story", false)
     )
 }
 
@@ -140,33 +154,74 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     val settings: StateFlow<AppSettings> = _settings.asStateFlow()
     private val _events = MutableStateFlow<List<ActivityEvent>>(emptyList())
     val events: StateFlow<List<ActivityEvent>> = _events.asStateFlow()
+    private val _drafts = MutableStateFlow<List<Draft>>(emptyList())
+    val drafts: StateFlow<List<Draft>> = _drafts.asStateFlow()
+    private val _playlists = MutableStateFlow<Map<String, List<Long>>>(emptyMap())
+    val playlists: StateFlow<Map<String, List<Long>>> = _playlists.asStateFlow()
+    private val lastEp = mutableMapOf<Long, Int>()
+    private val watchLog = mutableMapOf<String, Long>()
+    private val _breakKind = MutableStateFlow("break")
+    /** "break" (watched for a long time) or "bedtime". */
+    val breakKind: StateFlow<String> = _breakKind.asStateFlow()
+    private var bedSnoozeUntil = 0L
     private var watchedSecs = 0L
     private var lastTickAt = System.currentTimeMillis()
     private val _breakDue = MutableStateFlow(false)
     /** True when it is time for a break (you have been watching for the chosen number of hours). */
     val breakDue: StateFlow<Boolean> = _breakDue.asStateFlow()
 
+    private fun dayKey(ms: Long): String = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).format(java.util.Date(ms))
+
+    private fun inBedtime(start: Int, end: Int): Boolean {
+        if (start == end) return false
+        val h = java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY)
+        return if (start < end) h in start until end else (h >= start || h < end)
+    }
+
+    private fun touchDay(now: Long) {
+        val today = (now + java.util.TimeZone.getDefault().getOffset(now)) / 86_400_000L
+        val st = _settings.value
+        if (st.lastDay == today) return
+        val streak = if (st.lastDay == today - 1) st.streak + 1 else 1
+        _settings.update { it.copy(lastDay = today, streak = streak, bestStreak = maxOf(it.bestStreak, streak)) }
+        persist()
+    }
+
     /** Called once a second by the app. Time spent watching adds up; being away for 30 minutes counts as a break. */
     fun watchTick() {
         if (!AppState.foreground || !_settings.value.onboarded || _breakDue.value) return
-        val hours = _settings.value.breakHours
-        if (hours <= 0) return
         val now = System.currentTimeMillis()
         if (now - lastTickAt > 30 * 60 * 1000L) watchedSecs = 0L
         lastTickAt = now
+        touchDay(now)
+        val key = dayKey(now)
+        watchLog[key] = (watchLog[key] ?: 0L) + 1L
         watchedSecs += 1
         if (watchedSecs % 30L == 0L) persist()
-        if (watchedSecs >= hours * 3600L) _breakDue.value = true
+        if (watchedSecs % 60L == 0L) purgeStories()
+        val st = _settings.value
+        if (st.bedtimeOn && now >= bedSnoozeUntil && inBedtime(st.bedStart, st.bedEnd)) {
+            _breakKind.value = "bedtime"
+            _breakDue.value = true
+            return
+        }
+        if (st.breakHours > 0 && watchedSecs >= st.breakHours * 3600L) {
+            _breakKind.value = "break"
+            _breakDue.value = true
+        }
     }
 
+    fun watchLogMap(): Map<String, Long> = watchLog.toMap()
+
     fun endBreak() {
+        if (_breakKind.value == "bedtime") bedSnoozeUntil = System.currentTimeMillis() + 30 * 60 * 1000L
         watchedSecs = 0L
         lastTickAt = System.currentTimeMillis()
         _breakDue.value = false
         persist()
     }
 
-    fun previewBreak() { _breakDue.value = true }
+    fun previewBreak(kind: String = "break") { _breakKind.value = kind; _breakDue.value = true }
 
     private val _drama = MutableStateFlow<Pair<Long, Int>?>(null)
     /** The drama that is open (series id and the episode to start on), or null. */
@@ -176,6 +231,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     init {
         load()
+        purgeStories()
         ensureDemo()
     }
 
@@ -214,6 +270,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     bannerScale = p.optDouble("bsc", 1.0).toFloat(),
                     bannerOx = p.optDouble("box", 0.0).toFloat(),
                     bannerOy = p.optDouble("boy", 0.0).toFloat(),
+                    verified = p.optBoolean("ver", false),
+                    verifyRequest = p.optString("vreq", ""),
                     nameChangedAt = p.optLong("nca", 0L),
                     usernameChangedAt = p.optLong("uca", 0L),
                     isPrivate = p.optBoolean("private")
@@ -223,10 +281,22 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 _settings.value = AppSettings(
                     notifications = s.optBoolean("notif", true), autoplay = s.optBoolean("auto", true),
                     muted = s.optBoolean("muted", false), theme = s.optInt("theme", 0), accent = s.optInt("accent", 0),
-                    onboarded = s.optBoolean("onb", false), premium = s.optBoolean("prem", false), email = s.optString("email", ""), coins = s.optInt("coins", 0), breakHours = s.optInt("brk", 2)
+                    onboarded = s.optBoolean("onb", false), premium = s.optBoolean("prem", false), email = s.optString("email", ""), coins = s.optInt("coins", 0), breakHours = s.optInt("brk", 2), kidsMode = s.optBoolean("kids", false), pinHash = s.optString("pin", ""), bedtimeOn = s.optBoolean("bed", false), bedStart = s.optInt("bedS", 22), bedEnd = s.optInt("bedE", 6), streak = s.optInt("streak", 0), bestStreak = s.optInt("best", 0), lastDay = s.optLong("lday", 0L)
                 )
             }
             watchedSecs = o.optLong("watch", 0L)
+            o.optJSONArray("drafts")?.let { a ->
+                _drafts.value = (0 until a.length()).map { i -> a.getJSONObject(i).let { d -> Draft(d.getLong("id"), d.optString("t", "Draft"), d.getString("j"), d.optLong("at")) } }
+            }
+            o.optJSONObject("playlists")?.let { po ->
+                val m = mutableMapOf<String, List<Long>>()
+                po.keys().forEach { k -> val a = po.getJSONArray(k); m[k] = (0 until a.length()).map { a.getLong(it) } }
+                _playlists.value = m
+            }
+            lastEp.clear()
+            o.optJSONObject("lastep")?.let { lo -> lo.keys().forEach { k -> lastEp[k.toLong()] = lo.getInt(k) } }
+            watchLog.clear()
+            o.optJSONObject("wlog")?.let { wo -> wo.keys().forEach { k -> watchLog[k] = wo.getLong(k) } }
             val ev = o.optJSONArray("events") ?: JSONArray()
             _events.value = (0 until ev.length()).map {
                 val e = ev.getJSONObject(it)
@@ -242,11 +312,15 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         put("following", JSONArray(_following.value.toList()))
         val p = _profile.value
         put("profile", JSONObject().put("name", p.name).put("dn", p.displayName).put("bio", p.bio)
-            .put("avatar", p.avatar ?: "").put("banner", p.banner ?: "").put("bv", p.bannerVideo).put("bs", p.bannerStartMs).put("bsc", p.bannerScale.toDouble()).put("box", p.bannerOx.toDouble()).put("boy", p.bannerOy.toDouble()).put("nca", p.nameChangedAt).put("uca", p.usernameChangedAt).put("private", p.isPrivate))
+            .put("avatar", p.avatar ?: "").put("banner", p.banner ?: "").put("bv", p.bannerVideo).put("bs", p.bannerStartMs).put("bsc", p.bannerScale.toDouble()).put("box", p.bannerOx.toDouble()).put("boy", p.bannerOy.toDouble()).put("ver", p.verified).put("vreq", p.verifyRequest).put("nca", p.nameChangedAt).put("uca", p.usernameChangedAt).put("private", p.isPrivate))
         val s = _settings.value
         put("settings", JSONObject().put("notif", s.notifications).put("auto", s.autoplay).put("muted", s.muted)
-            .put("theme", s.theme).put("accent", s.accent).put("onb", s.onboarded).put("prem", s.premium).put("email", s.email).put("coins", s.coins).put("brk", s.breakHours))
+            .put("theme", s.theme).put("accent", s.accent).put("onb", s.onboarded).put("prem", s.premium).put("email", s.email).put("coins", s.coins).put("brk", s.breakHours).put("kids", s.kidsMode).put("pin", s.pinHash).put("bed", s.bedtimeOn).put("bedS", s.bedStart).put("bedE", s.bedEnd).put("streak", s.streak).put("best", s.bestStreak).put("lday", s.lastDay))
         put("watch", watchedSecs)
+        put("drafts", JSONArray().also { a -> _drafts.value.forEach { a.put(JSONObject().put("id", it.id).put("t", it.title).put("j", it.json).put("at", it.savedAt)) } })
+        put("playlists", JSONObject().also { po -> _playlists.value.forEach { (k, v) -> po.put(k, JSONArray(v)) } })
+        put("lastep", JSONObject().also { lo -> lastEp.forEach { (k, v) -> lo.put(k.toString(), v) } })
+        put("wlog", JSONObject().also { wo -> watchLog.entries.sortedByDescending { it.key }.take(14).forEach { wo.put(it.key, it.value) } })
         put("events", JSONArray().also { a ->
             _events.value.forEach { a.put(JSONObject().put("id", it.id).put("x", it.text).put("t", it.time).put("ty", it.type).put("vid", it.videoId).put("sys", it.sys)) }
         })
@@ -328,8 +402,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         if (p.clips.isEmpty()) return
         val me = _profile.value.name
         val now = System.currentTimeMillis()
-        val target = series?.addToId?.let { id -> _videos.value.firstOrNull { it.id == id && it.local } }
-        val title = target?.seriesTitle ?: series?.newTitle?.trim()?.takeIf { it.isNotEmpty() }?.take(60)
+        val asStory = series?.story == true
+        val target = if (asStory) null else series?.addToId?.let { id -> _videos.value.firstOrNull { it.id == id && it.local } }
+        val title = if (asStory) null else (target?.seriesTitle ?: series?.newTitle?.trim()?.takeIf { it.isNotEmpty() }?.take(60))
         val sid: Long? = if (title == null) null else (target?.seriesId ?: target?.id ?: now)
         val firstNo = if (sid != null && target != null) _videos.value.count { it.seriesId == sid } + 1 else 1
         // many episodes at once: every clip becomes its own episode
@@ -343,7 +418,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 caption = caption.ifBlank { if (title != null) "Episode " + (firstNo + i) else "My new edit" },
                 music = proj.audios.firstOrNull()?.name?.ifBlank { "Added song" } ?: "Original sound - $me",
                 likes = 0, createdAt = now + i, project = proj.toJson(),
-                seriesTitle = title, seriesId = sid, episodeNo = if (sid != null) firstNo + i else 0
+                seriesTitle = title, seriesId = sid, episodeNo = if (sid != null) firstNo + i else 0,
+                story = asStory
             )
         }
         // limited storage: only links to your gallery are kept, and only the newest posts
@@ -354,6 +430,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
         addEvent(
             when {
+                asStory -> "Your story was posted. It disappears in 24 hours"
                 title == null -> "Your edit was posted"
                 made.size > 1 -> made.size.toString() + " episodes of \"" + title + "\" were posted"
                 target != null -> "Episode " + firstNo + " added to \"" + title + "\""
@@ -364,6 +441,66 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         if (_settings.value.notifications) Notifier.send(ctx, "Posted on Twirlly", "Your edit is live on your profile.")
         onDone()
     }
+
+    /** Stories disappear after 24 hours. */
+    fun purgeStories() {
+        val cutoff = System.currentTimeMillis() - 24L * 60 * 60 * 1000
+        if (_videos.value.any { it.story && it.createdAt < cutoff }) {
+            _videos.update { l -> l.filter { !(it.story && it.createdAt < cutoff) } }
+            persist()
+        }
+    }
+
+    fun saveDraft(json: String, title: String) {
+        val now = System.currentTimeMillis()
+        _drafts.update { (listOf(Draft(now, title, json, now)) + it).take(10) }
+        persist()
+    }
+    fun deleteDraft(id: Long) { _drafts.update { l -> l.filter { it.id != id } }; persist() }
+    fun removeDraftByJson(json: String) { _drafts.update { l -> l.filter { it.json != json } }; persist() }
+
+    fun createPlaylist(name: String) {
+        val n = name.trim().take(30)
+        if (n.isEmpty() || _playlists.value.containsKey(n)) return
+        _playlists.update { it + (n to emptyList()) }
+        persist()
+    }
+    fun addToPlaylist(name: String, id: Long) {
+        _playlists.update { m -> m + (name to ((m[name] ?: emptyList()) + id).distinct()) }
+        persist()
+    }
+    fun removeFromPlaylist(name: String, id: Long) {
+        _playlists.update { m -> m + (name to (m[name] ?: emptyList()).filter { it != id }) }
+        persist()
+    }
+    fun deletePlaylist(name: String) { _playlists.update { it - name }; persist() }
+
+    fun lastEpisode(seriesId: Long): Int? = lastEp[seriesId]
+    fun setLastEpisode(seriesId: Long, ep: Int) {
+        if (lastEp[seriesId] != ep) { lastEp[seriesId] = ep; persist() }
+    }
+
+    private fun sha(pin: String): String =
+        java.security.MessageDigest.getInstance("SHA-256").digest(("twirlly:" + pin).toByteArray()).joinToString("") { "%02x".format(it) }
+    fun setKids(pin: String) { _settings.update { it.copy(kidsMode = true, pinHash = sha(pin)) }; persist() }
+    fun checkPin(pin: String): Boolean = sha(pin) == _settings.value.pinHash
+    fun disableKids() { _settings.update { it.copy(kidsMode = false, pinHash = "") }; persist() }
+
+    fun markVerificationRequested(json: String) {
+        _profile.update { it.copy(verifyRequest = json) }
+        addEvent("Verification request saved")
+        persist()
+    }
+
+    /** Replaces everything with a backup file made by Settings > Back up. */
+    fun importJson(text: String): Boolean = try {
+        JSONObject(text)
+        stateFile.writeText(text)
+        load()
+        purgeStories()
+        ensureDemo()
+        true
+    } catch (e: Exception) { false }
 
     fun deletePost(id: Long) {
         val v = _videos.value.firstOrNull { it.id == id } ?: return
