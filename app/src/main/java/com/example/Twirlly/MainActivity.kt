@@ -51,7 +51,7 @@ sealed interface Overlay {
     class Viewer(val ids: List<Long>, val start: Int, val back: Overlay? = null) : Overlay
     class User(val name: String) : Overlay
     class Live(val preview: Boolean) : Overlay
-    class Editor(val uris: List<Uri>) : Overlay
+    class Editor(val uris: List<Uri>, val draft: String? = null) : Overlay
 }
 
 class MainActivity : ComponentActivity() {
@@ -126,6 +126,9 @@ fun TwirllyApp(vm: AppViewModel) {
     val settings by vm.settings.collectAsState()
     val drama by vm.drama.collectAsState()
     val breakDue by vm.breakDue.collectAsState()
+    val breakKind by vm.breakKind.collectAsState()
+    var pinAction by remember { mutableStateOf<(() -> Unit)?>(null) }
+    fun gate(action: () -> Unit) { if (settings.kidsMode) pinAction = action else action() }
     LaunchedEffect(Unit) { while (true) { delay(1000); vm.watchTick() } }
     var tab by remember { mutableIntStateOf(0) }
     var overlay by remember { mutableStateOf<Overlay?>(null) }
@@ -168,7 +171,7 @@ fun TwirllyApp(vm: AppViewModel) {
         bottomBar = {
             if (overlay !is Overlay.Editor) {
                 BottomBar(tab, barColor, fg) { i ->
-                    if (i == 2) { vm.closeDrama(); overlay = Overlay.Editor(emptyList()) } else { vm.closeDrama(); tab = i; overlay = null }
+                    if (i == 2) gate { vm.closeDrama(); overlay = Overlay.Editor(emptyList()) } else { vm.closeDrama(); tab = i; overlay = null }
                 }
             }
         }
@@ -181,10 +184,11 @@ fun TwirllyApp(vm: AppViewModel) {
                 3 -> InboxScreen(vm) { ids, start -> overlay = Overlay.Viewer(ids, start) }
                 else -> ProfileScreen(
                     vm,
-                    onSettings = { overlay = Overlay.SettingsPage },
-                    onEdit = { overlay = Overlay.EditPage },
+                    onSettings = { gate { overlay = Overlay.SettingsPage } },
+                    onEdit = { gate { overlay = Overlay.EditPage } },
                     onOpen = { ids, start -> overlay = Overlay.Viewer(ids, start) },
-                    onLive = { overlay = Overlay.Live(false) }
+                    onLive = { gate { overlay = Overlay.Live(false) } },
+                    onDraft = { json -> gate { overlay = Overlay.Editor(emptyList(), json) } }
                 )
             }
             when (val o = overlay) {
@@ -194,7 +198,7 @@ fun TwirllyApp(vm: AppViewModel) {
                     val list = o.ids.mapNotNull { id -> videos.firstOrNull { it.id == id } }
                     FeedPager(vm, list, o.start, { overlay = o.back }, null, openUser)
                 }
-                is Overlay.Editor -> EditorScreen(vm, o.uris, onClose = { overlay = null }) {
+                is Overlay.Editor -> EditorScreen(vm, o.uris, o.draft, onClose = { overlay = null }) {
                     overlay = null
                     tab = 0
                 }
@@ -207,7 +211,12 @@ fun TwirllyApp(vm: AppViewModel) {
             drama?.let { d -> DramaScreen(vm, d.first, d.second) { vm.closeDrama() } }
         }
     }
-    if (breakDue) BreakScreen(settings.breakHours) { vm.endBreak() }
+    if (breakDue) BreakScreen(settings.breakHours, breakKind) { vm.endBreak() }
+    pinAction?.let { act ->
+        PinDialog("Kids mode PIN", onDismiss = { pinAction = null }) { pin ->
+            if (vm.checkPin(pin)) { pinAction = null; act(); true } else false
+        }
+    }
 }
 
 @Composable
