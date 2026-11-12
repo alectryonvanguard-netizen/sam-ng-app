@@ -61,15 +61,21 @@ fun DramaScreen(vm: AppViewModel, seriesId: Long, startEp: Int, onBack: () -> Un
     var heart by remember { mutableStateOf(false) }
     var progress by remember { mutableFloatStateOf(0f) }
     var advancedFrom by remember { mutableIntStateOf(-1) }
+    var cd by remember { mutableIntStateOf(0) }
+    var cdJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
     var jumpOpen by remember { mutableStateOf(false) }
     var commentsId by remember { mutableStateOf<Long?>(null) }
     var shareId by remember { mutableStateOf<Long?>(null) }
     val cur = eps[pager.currentPage.coerceIn(0, eps.size - 1)]
     val sheetOpen = jumpOpen || commentsId != null || shareId != null
     val title = cur.seriesTitle ?: "Drama"
-    val verified = !cur.local || settings.premium
+    val verified = !cur.local || profile.verified
 
-    LaunchedEffect(pager.currentPage) { advancedFrom = -1; progress = 0f; paused = false }
+    LaunchedEffect(pager.currentPage) {
+        cdJob?.cancel(); cd = 0
+        advancedFrom = -1; progress = 0f; paused = false
+        vm.setLastEpisode(seriesId, eps[pager.currentPage.coerceIn(0, eps.size - 1)].episodeNo)
+    }
     LaunchedEffect(heart) { if (heart) { delay(700); heart = false } }
 
     Box(Modifier.fillMaxSize().background(Color.Black)) {
@@ -85,13 +91,17 @@ fun DramaScreen(vm: AppViewModel, seriesId: Long, startEp: Int, onBack: () -> Un
             ) {
                 val proj = e.project
                 if (proj != null) {
-                    ProjectPlayer(proj, e.id, pager.currentPage == i && !paused && !sheetOpen && !breakOn && AppState.foreground, settings.muted) { p ->
+                    ProjectPlayer(proj, e.id, pager.currentPage == i && !paused && !sheetOpen && !breakOn && cd == 0 && AppState.foreground, settings.muted) { p ->
                         if (pager.currentPage == i) {
                             progress = p
                             // one finished: the next episode comes
                             if (p >= 0.985f && i < eps.size - 1 && advancedFrom != i) {
                                 advancedFrom = i
-                                scope.launch { pager.animateScrollToPage(i + 1) }
+                                cd = 3
+                                cdJob = scope.launch {
+                                    while (cd > 0) { delay(1000); cd-- }
+                                    pager.animateScrollToPage(i + 1)
+                                }
                             }
                         }
                     }
@@ -105,6 +115,22 @@ fun DramaScreen(vm: AppViewModel, seriesId: Long, startEp: Int, onBack: () -> Un
         )
         AnimatedVisibility(heart, Modifier.align(Alignment.Center), enter = scaleIn(), exit = fadeOut()) {
             Icon(Icons.Default.Favorite, null, tint = Color(0xFFFF2D87), modifier = Modifier.size(110.dp))
+        }
+
+        if (cd > 0) {
+            Row(
+                Modifier.align(Alignment.Center).clip(RoundedCornerShape(50)).background(Color.Black.copy(alpha = 0.6f))
+                    .clickable {
+                        cdJob?.cancel(); cd = 0
+                        val next = pager.currentPage + 1
+                        scope.launch { pager.animateScrollToPage(next) }
+                    }.padding(horizontal = 18.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(Icons.Default.PlayArrow, null, tint = Color.White)
+                Spacer(Modifier.width(8.dp))
+                Text("Next episode in $cd  -  tap to skip", color = Color.White, fontWeight = FontWeight.Bold)
+            }
         }
 
         // top: back arrow, title, sound
@@ -201,15 +227,20 @@ fun DramaScreen(vm: AppViewModel, seriesId: Long, startEp: Int, onBack: () -> Un
                 Text("Episodes (" + eps.size + ")", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 18.sp)
                 Text("Tap a number to jump to that episode.", color = Color.Gray, fontSize = 12.sp)
                 Spacer(Modifier.height(12.dp))
-                LazyVerticalGrid(GridCells.Fixed(5), Modifier.heightIn(max = 300.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                LazyVerticalGrid(GridCells.Fixed(3), Modifier.heightIn(max = 420.dp), verticalArrangement = Arrangement.spacedBy(8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     itemsIndexed(eps) { idx, e ->
                         val on = idx == pager.currentPage
                         Box(
-                            Modifier.size(54.dp).clip(CircleShape)
-                                .background(if (on) Brush.linearGradient(listOf(Color(0xFFFF2D87), Color(0xFF7B2FF7))) else Brush.linearGradient(listOf(Color.White.copy(alpha = 0.12f), Color.White.copy(alpha = 0.12f))))
-                                .clickable { jumpOpen = false; scope.launch { pager.animateScrollToPage(idx) } },
-                            contentAlignment = Alignment.Center
-                        ) { Text(e.episodeNo.toString(), color = Color.White, fontWeight = FontWeight.Bold, fontSize = 18.sp) }
+                            Modifier.clip(RoundedCornerShape(12.dp))
+                                .then(if (on) Modifier.border(2.dp, Color(0xFFFF2D87), RoundedCornerShape(12.dp)) else Modifier)
+                        ) {
+                            PostCard(e, Modifier.fillMaxWidth(), onClick = { jumpOpen = false; scope.launch { pager.animateScrollToPage(idx) } })
+                            Text(
+                                "EP " + e.episodeNo, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.sp,
+                                modifier = Modifier.align(Alignment.TopStart).padding(6.dp).clip(RoundedCornerShape(50))
+                                    .background(if (on) Color(0xFFFF2D87) else Color.Black.copy(alpha = 0.6f)).padding(horizontal = 8.dp, vertical = 2.dp)
+                            )
+                        }
                     }
                 }
             }
