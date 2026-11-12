@@ -50,7 +50,8 @@ private fun TipRow(emoji: String, title: String, text: String) {
 
 /** Shown after the chosen hours of watching. The Return button fills up and unlocks after 5 seconds. */
 @Composable
-fun BreakScreen(hours: Int, onReturn: () -> Unit) {
+fun BreakScreen(hours: Int, kind: String = "break", onReturn: () -> Unit) {
+    val bed = kind == "bedtime"
     val inf = rememberInfiniteTransition(label = "breathe")
     val breathe by inf.animateFloat(0.88f, 1.12f, infiniteRepeatable(tween(3600, easing = FastOutSlowInEasing), RepeatMode.Reverse), label = "b")
     val progress = remember { Animatable(0f) }
@@ -82,21 +83,28 @@ fun BreakScreen(hours: Int, onReturn: () -> Unit) {
                         Modifier.size(112.dp).scale(0.92f + (breathe - 0.88f) * 0.4f).clip(CircleShape)
                             .background(Brush.linearGradient(listOf(Color(0xFF38BDF8), Color(0xFF7B2FF7)))),
                         contentAlignment = Alignment.Center
-                    ) { Text("\uD83D\uDCA7", fontSize = 48.sp) }
+                    ) { Text(if (bed) "\uD83C\uDF19" else "\uD83D\uDCA7", fontSize = 48.sp) }
                 }
                 Spacer(Modifier.height(18.dp))
-                Text("Time for a break", color = Color.White, fontSize = 32.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)
+                Text(if (bed) "Time to sleep" else "Time for a break", color = Color.White, fontSize = 32.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    if (hours <= 1) "You have been watching for 1 hour." else "You have been watching for $hours hours.",
+                    if (bed) "It is bedtime. Rest well, Twirlly will be here tomorrow."
+                    else if (hours <= 1) "You have been watching for 1 hour." else "You have been watching for $hours hours.",
                     color = Color.White.copy(alpha = 0.75f), fontSize = 15.sp, textAlign = TextAlign.Center
                 )
                 Spacer(Modifier.height(4.dp))
                 Text("Breathe in... and out.", color = Color(0xFF7DD3FC), fontSize = 14.sp)
                 Spacer(Modifier.height(22.dp))
-                TipRow("\uD83D\uDCA7", "Drink some water", "Grab a glass. Your body will thank you.")
-                TipRow("\uD83E\uDDD8", "Stretch yourself", "Stand up, roll your shoulders and loosen your neck.")
-                TipRow("\uD83D\uDC40", "Rest your eyes", "Look at something far away for 20 seconds.")
+                if (bed) {
+                    TipRow("\uD83D\uDCF5", "Put the phone down", "Place it away from your bed.")
+                    TipRow("\uD83D\uDCA1", "Dim the lights", "A dark room helps you fall asleep.")
+                    TipRow("\uD83E\uDDD8", "Breathe slowly", "In for 4 seconds, out for 6.")
+                } else {
+                    TipRow("\uD83D\uDCA7", "Drink some water", "Grab a glass. Your body will thank you.")
+                    TipRow("\uD83E\uDDD8", "Stretch yourself", "Stand up, roll your shoulders and loosen your neck.")
+                    TipRow("\uD83D\uDC40", "Rest your eyes", "Look at something far away for 20 seconds.")
+                }
                 Spacer(Modifier.height(28.dp))
                 Box(
                     Modifier.fillMaxWidth().height(58.dp).clip(RoundedCornerShape(50))
