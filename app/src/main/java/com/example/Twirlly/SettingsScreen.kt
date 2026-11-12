@@ -91,12 +91,31 @@ fun SettingsScreen(vm: AppViewModel, onBack: () -> Unit, onEditProfile: () -> Un
     var premiumOpen by remember { mutableStateOf(false) }
     var insightsOpen by remember { mutableStateOf(false) }
     var confirmOut by remember { mutableStateOf(false) }
+    var screenTimeOpen by remember { mutableStateOf(false) }
+    var verifyOpen by remember { mutableStateOf(false) }
+    var rewardsOpen by remember { mutableStateOf(false) }
+    var kidsSetup by remember { mutableStateOf(false) }
     var usedBytes by remember { mutableLongStateOf(vm.mediaBytes()) }
     val version = remember {
         try { ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName ?: "2.0" } catch (e: Exception) { "2.0" }
     }
 
     fun toast(msg: String) = Toast.makeText(ctx, msg, Toast.LENGTH_SHORT).show()
+
+    val createBackup = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
+        if (uri != null) {
+            try {
+                ctx.contentResolver.openOutputStream(uri)?.use { it.write(vm.exportJson().toByteArray()) }
+                toast("Backup saved")
+            } catch (e: Exception) { toast("Could not save the backup") }
+        }
+    }
+    val restoreBackup = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            val text = try { ctx.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() } } catch (e: Exception) { null }
+            if (text != null && vm.importJson(text)) toast("Backup restored") else toast("That file is not a Twirlly backup")
+        }
+    }
 
     val permLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         vm.updateSettings { it.copy(notifications = granted) }
@@ -162,6 +181,10 @@ fun SettingsScreen(vm: AppViewModel, onBack: () -> Unit, onEditProfile: () -> Un
                     ctx.startActivity(Intent.createChooser(i, "Export my data"))
                 })
                 Row3(Icons.Default.AccountCircle, if (s.email.isBlank()) "Guest mode" else s.email, if (s.email.isBlank()) "Sign in from the welcome page after logging out" else "Signed in")
+                Row3(Icons.Default.Verified, if (profile.verified) "Verified" else "Request a verified badge", if (profile.verified) "Your account is verified" else if (profile.verifyRequest.isNotBlank()) "Request saved" else "For businesses and known creators", onClick = { verifyOpen = true })
+                Row3(Icons.Default.EmojiEvents, "Rewards and level", "Streak, badges and weekly challenges", onClick = { rewardsOpen = true })
+                Row3(Icons.Default.Backup, "Back up to a file", "Save your profile and posts", onClick = { createBackup.launch("twirlly-backup.json") })
+                Row3(Icons.Default.Restore, "Restore from a backup", "Pick a backup file", onClick = { restoreBackup.launch(arrayOf("*/*")) })
                 Row3(Icons.AutoMirrored.Filled.ExitToApp, "Log out", "You will be asked to confirm", onClick = { confirmOut = true })
             }
 
@@ -185,6 +208,15 @@ fun SettingsScreen(vm: AppViewModel, onBack: () -> Unit, onEditProfile: () -> Un
                     }
                 }
                 Row3(Icons.Default.Timer, "Preview break screen", "See how it looks", onClick = { vm.previewBreak() })
+                Row3(Icons.Default.BarChart, "Screen time", "Your watch time this week", onClick = { screenTimeOpen = true })
+                SwitchRow(Icons.Default.Bedtime, "Bedtime mode", "A quiet reminder at night", s.bedtimeOn) { v -> vm.updateSettings { it.copy(bedtimeOn = v) } }
+                if (s.bedtimeOn) {
+                    HourRow("From", s.bedStart) { h -> vm.updateSettings { it.copy(bedStart = h) } }
+                    HourRow("Until", s.bedEnd) { h -> vm.updateSettings { it.copy(bedEnd = h) } }
+                    Row3(Icons.Default.Timer, "Preview bedtime screen", "See how it looks", onClick = { vm.previewBreak("bedtime") })
+                }
+                if (s.kidsMode) Row3(Icons.Default.ChildCare, "Kids mode is on", "Tap to turn it off", onClick = { vm.disableKids() })
+                else Row3(Icons.Default.ChildCare, "Kids mode", "Lock create, LIVE and settings with a PIN", onClick = { kidsSetup = true })
             }
 
             Section("Appearance")
@@ -251,6 +283,10 @@ fun SettingsScreen(vm: AppViewModel, onBack: () -> Unit, onEditProfile: () -> Un
     legal?.let { LegalDialog(it) { legal = null } }
     if (premiumOpen) PremiumDialog(vm) { premiumOpen = false }
     if (insightsOpen) InsightsDialog(vm) { insightsOpen = false }
+    if (screenTimeOpen) ScreenTimeDialog(vm) { screenTimeOpen = false }
+    if (verifyOpen) VerificationDialog(vm) { verifyOpen = false }
+    if (rewardsOpen) RewardsDialog(vm) { rewardsOpen = false }
+    if (kidsSetup) SetPinDialog(onDismiss = { kidsSetup = false }) { pin -> vm.setKids(pin); kidsSetup = false }
     if (confirmOut) {
         AlertDialog(
             onDismissRequest = { confirmOut = false },
