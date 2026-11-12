@@ -90,7 +90,7 @@ fun DiscoverScreen(vm: AppViewModel, onUser: (String) -> Unit = {}, onOpen: (Lis
             .entries.sortedByDescending { it.value }.take(10).map { it.key }
     }
     val creators = DemoContent.creators
-    val results = videos.filter { (it.seriesId == null || it.episodeNo <= 1) && (q.isBlank() || it.caption.contains(q, true) || it.user.contains(q, true)) }
+    val results = videos.filter { !it.story && (it.seriesId == null || it.episodeNo <= 1) && (q.isBlank() || it.caption.contains(q, true) || it.user.contains(q, true)) }
 
     Column(Modifier.fillMaxSize().statusBarsPadding().padding(12.dp)) {
         OutlinedTextField(
