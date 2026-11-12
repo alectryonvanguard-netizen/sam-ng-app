@@ -69,6 +69,7 @@ fun DramaScreen(vm: AppViewModel, seriesId: Long, startEp: Int, onBack: () -> Un
     val cur = eps[pager.currentPage.coerceIn(0, eps.size - 1)]
     val sheetOpen = jumpOpen || commentsId != null || shareId != null
     val title = cur.seriesTitle ?: "Drama"
+    val totalMs = remember(cur.id) { try { cur.project?.let { projectFromJson(it).totalMs() } ?: 0L } catch (e: Exception) { 0L } }
     val verified = !cur.local || profile.verified
 
     LaunchedEffect(pager.currentPage) {
@@ -214,6 +215,7 @@ fun DramaScreen(vm: AppViewModel, seriesId: Long, startEp: Int, onBack: () -> Un
             Action(Icons.Default.Link, "", Color.White) { shareId = cur.id }
         }
 
+        EndMark(progress, totalMs, Modifier.align(Alignment.TopStart).statusBarsPadding().padding(start = 16.dp, top = 64.dp))
         LinearProgressIndicator(
             progress = { progress },
             modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(2.dp),
