@@ -374,3 +374,43 @@ fun mediaModel(p: String): Any = if (p.startsWith("http") || p.startsWith("conte
 fun keepAccess(ctx: Context, u: Uri) {
     try { ctx.contentResolver.takePersistableUriPermission(u, Intent.FLAG_GRANT_READ_URI_PERMISSION) } catch (_: Exception) {}
 }
+
+/** Records a voice-over with the microphone. The file is the only thing Twirlly keeps for it. */
+object VoiceRecorder {
+    private var rec: android.media.MediaRecorder? = null
+    private var file: File? = null
+
+    fun start(ctx: Context): Boolean = try {
+        val dir = File(ctx.filesDir, "media")
+        dir.mkdirs()
+        val f = File(dir, "voice_" + System.currentTimeMillis() + ".m4a")
+        file = f
+        @Suppress("DEPRECATION")
+        val r = if (android.os.Build.VERSION.SDK_INT >= 31) android.media.MediaRecorder(ctx) else android.media.MediaRecorder()
+        r.setAudioSource(android.media.MediaRecorder.AudioSource.MIC)
+        r.setOutputFormat(android.media.MediaRecorder.OutputFormat.MPEG_4)
+        r.setAudioEncoder(android.media.MediaRecorder.AudioEncoder.AAC)
+        r.setAudioSamplingRate(44100)
+        r.setAudioEncodingBitRate(128000)
+        r.setOutputFile(f.absolutePath)
+        r.prepare()
+        r.start()
+        rec = r
+        true
+    } catch (e: Exception) {
+        false
+    }
+
+    fun stop(): String? {
+        val r = rec ?: return null
+        rec = null
+        return try {
+            r.stop()
+            r.release()
+            file?.absolutePath
+        } catch (e: Exception) {
+            try { r.release() } catch (_: Exception) {}
+            null
+        }
+    }
+}
