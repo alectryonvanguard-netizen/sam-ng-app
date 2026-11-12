@@ -3,6 +3,11 @@ package com.example.twirlly
 import android.net.Uri
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
+import kotlinx.coroutines.delay
+import android.Manifest
+import android.os.Build
+import android.content.pm.PackageManager
+import androidx.core.content.ContextCompat
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -417,7 +422,7 @@ private fun Timeline(
 }
 
 @Composable
-private fun PostDetails(thumb: String?, clipCount: Int, suggested: List<String>, dramas: List<Pair<Long, String>>, premium: Boolean, onNeedPremium: () -> Unit, onBack: () -> Unit, onPost: (String, SeriesChoice?) -> Unit) {
+private fun PostDetails(thumb: String?, clipCount: Int, suggested: List<String>, dramas: List<Pair<Long, String>>, premium: Boolean, onNeedPremium: () -> Unit, onBack: () -> Unit, onDraft: () -> Unit, onExport: () -> Unit, onPost: (String, SeriesChoice?) -> Unit) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     var busy by remember { mutableStateOf(false) }
@@ -427,6 +432,7 @@ private fun PostDetails(thumb: String?, clipCount: Int, suggested: List<String>,
     var dramaTitle by remember { mutableStateOf("") }
     var dramaTarget by remember { mutableStateOf<Long?>(null) }
     var splitEps by remember { mutableStateOf(false) }
+    var asStory by remember { mutableStateOf(false) }
     val tags = remember { mutableStateListOf<String>() }
     fun addTag(raw: String) {
         val w = raw.trim().trimStart('#').replace(Regex("[^\\p{L}\\p{N}_]"), "")
@@ -499,6 +505,15 @@ private fun PostDetails(thumb: String?, clipCount: Int, suggested: List<String>,
                         modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
                     )
                 }
+                if (dramaMode == 0 && dramaTarget == null) {
+                    Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Post as a story")
+                            Text("It disappears after 24 hours", fontSize = 12.sp, color = Color.Gray)
+                        }
+                        Switch(checked = asStory, onCheckedChange = { asStory = it })
+                    }
+                }
                 if (clipCount > 1 && (dramaMode == 1 || dramaTarget != null)) {
                     Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
@@ -512,6 +527,7 @@ private fun PostDetails(thumb: String?, clipCount: Int, suggested: List<String>,
                 Button(
                     onClick = {
                         val choice = when {
+                            asStory && dramaMode == 0 && dramaTarget == null -> SeriesChoice(story = true)
                             dramaTarget != null -> SeriesChoice(addToId = dramaTarget, splitClips = splitEps)
                             dramaMode == 1 && dramaTitle.isNotBlank() -> SeriesChoice(newTitle = dramaTitle, splitClips = splitEps)
                             else -> null
@@ -521,25 +537,36 @@ private fun PostDetails(thumb: String?, clipCount: Int, suggested: List<String>,
                     modifier = Modifier.fillMaxWidth().height(52.dp),
                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00C8E0), contentColor = Color.Black)
                 ) { Text("Post", fontWeight = FontWeight.Bold, fontSize = 16.sp) }
+                Spacer(Modifier.height(8.dp))
+                OutlinedButton(
+                    onClick = { onPost((desc.trim() + " " + tags.joinToString(" ")).trim(), SeriesChoice(story = true)) },
+                    modifier = Modifier.fillMaxWidth().height(48.dp)
+                ) { Text("Share to story (24 hours)") }
+                Spacer(Modifier.height(8.dp))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = onDraft, modifier = Modifier.weight(1f).height(48.dp)) { Text("Save draft") }
+                    OutlinedButton(onClick = onExport, modifier = Modifier.weight(1f).height(48.dp)) { Text("Save to phone") }
+                }
+                Spacer(Modifier.height(24.dp))
             }
         }
     }
 }
 
 @Composable
-fun EditorScreen(vm: AppViewModel, uris: List<Uri>, onClose: () -> Unit, onPosted: () -> Unit) {
+fun EditorScreen(vm: AppViewModel, uris: List<Uri>, draft: String?, onClose: () -> Unit, onPosted: () -> Unit) {
     MaterialTheme(
         colorScheme = darkColorScheme(
             primary = Color(0xFF00C8E0), background = Color(0xFF161616), surface = Color(0xFF1F1F1F),
             onBackground = Color.White, onSurface = Color.White
         )
     ) {
-        EditorBody(vm, uris, onClose, onPosted)
+        EditorBody(vm, uris, draft, onClose, onPosted)
     }
 }
 
 @Composable
-private fun EditorBody(vm: AppViewModel, uris: List<Uri>, onClose: () -> Unit, onPosted: () -> Unit) {
+private fun EditorBody(vm: AppViewModel, uris: List<Uri>, draft: String?, onClose: () -> Unit, onPosted: () -> Unit) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     val cyan = Color(0xFF00C8E0)
@@ -565,6 +592,16 @@ private fun EditorBody(vm: AppViewModel, uris: List<Uri>, onClose: () -> Unit, o
     var showDiscard by remember { mutableStateOf(false) }
     var emojiOpen by remember { mutableStateOf(false) }
     var fxOpen by remember { mutableStateOf(false) }
+    var templatesOpen by remember { mutableStateOf(false) }
+    var exporting by remember { mutableStateOf(false) }
+    var exportPct by remember { mutableIntStateOf(0) }
+    var voiceOpen by remember { mutableStateOf(false) }
+    var recording by remember { mutableStateOf(false) }
+    var recStart by remember { mutableLongStateOf(0L) }
+    var recSecs by remember { mutableIntStateOf(0) }
+    val micPerm = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
+        if (ok) voiceOpen = true else Toast.makeText(ctx, "Microphone permission is needed", Toast.LENGTH_SHORT).show()
+    }
     val imported = remember { mutableListOf<String>() }
     val total = project.totalMs()
     val waves = remember { mutableStateMapOf<String, ByteArray>() }
@@ -649,6 +686,46 @@ private fun EditorBody(vm: AppViewModel, uris: List<Uri>, onClose: () -> Unit, o
         change { it.copy(layers = it.layers + l) }
         select(layer = l.id)
     }
+    fun applyTemplate(i: Int) {
+        if (project.clips.isEmpty()) { toast("Add photos or videos first"); return }
+        val total = project.totalMs()
+        fun mkLayer(text: String, emoji: Boolean, x: Float, y: Float, size: Float, start: Long, end: Long, style: Int = 0) =
+            Layer(id = System.nanoTime() + (0..999).random(), emoji = emoji, text = text, color = -1, size = size, font = 0, bold = true, bg = false,
+                startMs = start, endMs = end, tr = Tr(x = x, y = y), keys = emptyList(), style = style)
+        fun mkFx(kind: Int) = Fx(System.nanoTime() + (0..999).random(), kind, 0L, total, 1f)
+        change { p ->
+            val clips = p.clips.mapIndexed { idx, c ->
+                when (i) {
+                    0 -> c.copy(filter = 13, trans = if (idx > 0) 1 else 0, transMs = 700)
+                    1 -> c.copy(filter = 16, saturation = 1.3f, brightness = 0.05f, trans = if (idx > 0) 1 else 0)
+                    2 -> c.copy(filter = 14, trans = if (idx > 0) 1 else 0, transMs = 800)
+                    3 -> c.copy(filter = 10, trans = if (idx > 0) 3 else 0)
+                    4 -> c.copy(outMs = if (!c.isVideo) 2500L else c.outMs, trans = if (idx > 0) 1 else 0)
+                    else -> c.copy(trans = if (idx > 0) 3 else 0)
+                }
+            }
+            var layers = p.layers
+            var fxs = p.fx
+            when (i) {
+                0 -> fxs = fxs + mkFx(9) + mkFx(0)
+                1 -> layers = layers + mkLayer("🌸", true, 0.86f, 0.1f, 0.14f, 0L, total) + mkLayer("✨", true, 0.12f, 0.16f, 0.1f, 0L, total)
+                2 -> { fxs = fxs + mkFx(0); layers = layers + mkLayer("Memories", false, 0.5f, 0.5f, 0.11f, 300L, minOf(total, 3500L)) }
+                3 -> { fxs = fxs + mkFx(2) + mkFx(0); layers = layers + mkLayer("NIGHT VIBES", false, 0.5f, 0.82f, 0.08f, 300L, total, 2) }
+                5 -> layers = layers + mkLayer("Happy Birthday!", false, 0.5f, 0.2f, 0.1f, 0L, total) + mkLayer("🎉", true, 0.15f, 0.5f, 0.16f, 0L, total) + mkLayer("🎂", true, 0.85f, 0.5f, 0.16f, 0L, total)
+            }
+            p.copy(clips = clips, layers = layers, fx = fxs)
+        }
+        toast("Template applied")
+    }
+
+    fun startExport() {
+        if (project.clips.isEmpty()) { toast("Add something first"); return }
+        if (Build.VERSION.SDK_INT < 29) { toast("Saving needs Android 10 or newer"); return }
+        exporting = true
+        exportPct = 0
+        Exporter.export(ctx, project, { exportPct = it }) { _, msg -> exporting = false; toast(msg) }
+    }
+
     fun addFx(kind: Int) {
         if (total <= 0L) { toast("Add a photo or video first"); return }
         val start = t.coerceIn(0L, (total - 300L).coerceAtLeast(0L))
@@ -698,7 +775,8 @@ private fun EditorBody(vm: AppViewModel, uris: List<Uri>, onClose: () -> Unit, o
     }
 
     LaunchedEffect(Unit) {
-        if (uris.isEmpty()) launchMedia() else importUris(uris)
+        if (draft != null) project = projectFromJson(draft)
+        else if (uris.isEmpty()) launchMedia() else importUris(uris)
     }
 
     LaunchedEffect(playing) {
@@ -857,6 +935,19 @@ private fun EditorBody(vm: AppViewModel, uris: List<Uri>, onClose: () -> Unit, o
         Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = { showDiscard = true }) { Icon(Icons.Default.Close, "Close") }
             Spacer(Modifier.weight(1f))
+            TopAction(Icons.Default.Save, "Draft") {
+                if (project.clips.isEmpty()) toast("Add something first")
+                else { vm.saveDraft(project.toJson(), "Draft"); toast("Draft saved"); onClose() }
+            }
+            TopAction(Icons.Default.AutoStories, "Story") {
+                if (project.clips.isEmpty()) toast("Add something first")
+                else vm.postProject(project, "", SeriesChoice(story = true)) {
+                    if (draft != null) vm.removeDraftByJson(draft)
+                    toast("Shared to your story for 24 hours")
+                    onPosted()
+                }
+            }
+            TopAction(Icons.Default.Download, "Save") { startExport() }
             Button(
                 onClick = { showPost = true },
                 enabled = project.clips.isNotEmpty(),
@@ -1311,10 +1402,82 @@ private fun EditorBody(vm: AppViewModel, uris: List<Uri>, onClose: () -> Unit, o
                 ToolButton(Icons.Default.Image, "Overlay") { launchOverlay() }
                 ToolButton(Icons.Default.Star, "Effects") { fxOpen = true }
                 ToolButton(Icons.Default.AspectRatio, "Shape") { ratioOpen = true }
+                ToolButton(Icons.Default.AutoAwesome, "Templates") { templatesOpen = true }
+                ToolButton(Icons.Default.Mic, "Voice") {
+                    if (!premium && project.audios.size >= 2) premiumPrompt = true
+                    else if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) voiceOpen = true
+                    else micPerm.launch(Manifest.permission.RECORD_AUDIO)
+                }
             }
         }
     }
 
+    if (exporting) {
+        AlertDialog(
+            onDismissRequest = {},
+            title = { Text("Saving video") },
+            text = {
+                Column {
+                    LinearProgressIndicator(progress = { exportPct / 100f }, modifier = Modifier.fillMaxWidth())
+                    Spacer(Modifier.height(8.dp))
+                    Text("$exportPct%  -  a small Twirlly mark is added at the end", fontSize = 12.sp, color = Color.Gray)
+                }
+            },
+            confirmButton = { TextButton(onClick = { Exporter.cancel(); exporting = false }) { Text("Cancel") } }
+        )
+    }
+    if (templatesOpen) {
+        val names = listOf("🎬 Cinematic", "🌸 Anime", "📷 Memories", "🌃 Neon night", "🖼️ Slideshow", "🎂 Birthday")
+        AlertDialog(
+            onDismissRequest = { templatesOpen = false },
+            title = { Text("Templates") },
+            text = {
+                Column {
+                    Text("One tap sets the look. You can still change everything.", fontSize = 12.sp, color = Color.Gray)
+                    Spacer(Modifier.height(8.dp))
+                    names.forEachIndexed { i, n ->
+                        val locked = i in 3..3 && !premium
+                        TextButton(onClick = { if (locked) { templatesOpen = false; premiumPrompt = true } else { applyTemplate(i); templatesOpen = false } }) {
+                            Text(if (locked) n + " ★" else n, fontSize = 17.sp)
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { templatesOpen = false }) { Text("Close") } }
+        )
+    }
+    if (voiceOpen) {
+        LaunchedEffect(recording) {
+            while (recording) { delay(1000); recSecs = ((System.currentTimeMillis() - recStart) / 1000).toInt() }
+        }
+        AlertDialog(
+            onDismissRequest = { if (!recording) voiceOpen = false },
+            title = { Text("Voice-over") },
+            text = {
+                Column {
+                    Text(if (recording) "Recording... $recSecs s" else "It is placed at the playhead (" + timeStr(t) + ").")
+                    Text("Speak close to the phone.", fontSize = 12.sp, color = Color.Gray)
+                }
+            },
+            confirmButton = {
+                Button(onClick = {
+                    if (!recording) {
+                        recSecs = 0
+                        if (VoiceRecorder.start(ctx)) { recording = true; recStart = System.currentTimeMillis() } else toast("Could not start the microphone")
+                    } else {
+                        val path = VoiceRecorder.stop()
+                        recording = false
+                        voiceOpen = false
+                        if (path != null) {
+                            val dur = (System.currentTimeMillis() - recStart).coerceAtLeast(500L)
+                            change { p -> p.copy(audios = p.audios + AudioClip(id = System.nanoTime(), path = path, name = "Voice-over", srcMs = dur, outMs = dur, startMs = t)) }
+                        }
+                    }
+                }) { Text(if (recording) "Stop" else "Start recording") }
+            },
+            dismissButton = { if (!recording) TextButton(onClick = { voiceOpen = false }) { Text("Cancel") } }
+        )
+    }
     if (emojiOpen) {
         AlertDialog(
             onDismissRequest = { emojiOpen = false },
@@ -1370,11 +1533,11 @@ private fun EditorBody(vm: AppViewModel, uris: List<Uri>, onClose: () -> Unit, o
                 .entries.sortedByDescending { it.value }.take(8).map { it.key }
         }
         val suggested = (trending + listOf("#fyp", "#viral", "#foryou", "#trending", "#edit")).distinct().take(12)
-        PostDetails(project.clips.firstOrNull()?.path, project.clips.size, suggested, vids.filter { it.local && it.seriesTitle != null && it.episodeNo <= 1 }.map { it.id to (it.seriesTitle ?: "") }, premium, onNeedPremium = { premiumPrompt = true }, onBack = { showPost = false }) { cap, choice ->
+        PostDetails(project.clips.firstOrNull()?.path, project.clips.size, suggested, vids.filter { it.local && it.seriesTitle != null && it.episodeNo <= 1 }.map { it.id to (it.seriesTitle ?: "") }, premium, onNeedPremium = { premiumPrompt = true }, onBack = { showPost = false }, onDraft = { vm.saveDraft(project.toJson(), "Draft"); toast("Draft saved"); showPost = false; onClose() }, onExport = { startExport() }) { cap, choice ->
             showPost = false
             val used = project.files().toSet()
             imported.filter { it !in used }.forEach { File(it).delete() }
-            vm.postProject(project, cap, choice) { onPosted() }
+            vm.postProject(project, cap, choice) { if (draft != null) vm.removeDraftByJson(draft); onPosted() }
         }
     }
     if (ratioOpen) {
@@ -1407,7 +1570,24 @@ private fun EditorBody(vm: AppViewModel, uris: List<Uri>, onClose: () -> Unit, o
                     onClose()
                 }) { Text("Discard") }
             },
-            dismissButton = { TextButton(onClick = { showDiscard = false }) { Text("Keep editing") } }
+            dismissButton = {
+                Row {
+                    TextButton(onClick = { showDiscard = false }) { Text("Keep editing") }
+                    if (project.clips.isNotEmpty()) TextButton(onClick = { vm.saveDraft(project.toJson(), "Draft"); showDiscard = false; onClose() }) { Text("Save draft") }
+                }
+            }
         )
+    }
+}
+
+
+@Composable
+private fun TopAction(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, onClick: () -> Unit) {
+    Column(
+        Modifier.clickable(onClick = onClick).padding(horizontal = 8.dp, vertical = 2.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Icon(icon, label, tint = Color.White, modifier = Modifier.size(22.dp))
+        Text(label, color = Color.White, fontSize = 10.sp)
     }
 }
