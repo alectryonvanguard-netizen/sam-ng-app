@@ -68,7 +68,7 @@ fun FeedScreen(vm: AppViewModel, onOpenProfile: () -> Unit, onUser: (Video) -> U
     val all by vm.videos.collectAsState()
     val following by vm.following.collectAsState()
     var forYou by remember { mutableStateOf(true) }
-    val covers = all.filter { it.seriesId == null || it.episodeNo <= 1 }
+    val covers = all.filter { (it.seriesId == null || it.episodeNo <= 1) && !it.story }
     val list = if (forYou) covers else covers.filter { it.user in following }
 
     Box(Modifier.fillMaxSize().background(Color.Black)) {
@@ -228,7 +228,7 @@ fun VideoPage(v: Video, active: Boolean, vm: AppViewModel, onUser: (Video) -> Un
         Modifier.fillMaxSize().pointerInput(v.id) {
             detectTapGestures(
                 onTap = {
-                    if (isDrama && pendingLike?.isActive == true) { pendingLike?.cancel(); heart = false; vm.openDrama(sid, maxOf(1, v.episodeNo)) }
+                    if (isDrama && pendingLike?.isActive == true) { pendingLike?.cancel(); heart = false; vm.openDrama(sid, vm.lastEpisode(sid) ?: maxOf(1, v.episodeNo)) }
                     else if (!v.isImage || isAlbum) paused = !paused
                 },
                 onDoubleTap = {
@@ -284,12 +284,12 @@ fun VideoPage(v: Video, active: Boolean, vm: AppViewModel, onUser: (Video) -> Un
             if (isDrama) {
                 Row(
                     Modifier.clip(RoundedCornerShape(50)).background(Brush.horizontalGradient(listOf(Color(0xFFFF2D87), Color(0xFF7B2FF7))))
-                        .clickable { vm.openDrama(sid, maxOf(1, v.episodeNo)) }.padding(horizontal = 10.dp, vertical = 4.dp),
+                        .clickable { vm.openDrama(sid, vm.lastEpisode(sid) ?: maxOf(1, v.episodeNo)) }.padding(horizontal = 10.dp, vertical = 4.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Icon(Icons.Default.Movie, null, tint = Color.White, modifier = Modifier.size(14.dp))
                     Spacer(Modifier.width(5.dp))
-                    Text("DRAMA - " + maxOf(1, epCount) + " episodes - triple-tap", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    Text((if (vm.lastEpisode(sid) != null) "CONTINUE EPISODE " + vm.lastEpisode(sid) + " of " + maxOf(1, epCount) else "DRAMA - " + maxOf(1, epCount) + " episodes - triple-tap"), color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                 }
                 Spacer(Modifier.height(6.dp))
             }
