@@ -88,7 +88,12 @@ fun ShareSheet(v: Video, vm: AppViewModel, onDismiss: () -> Unit) {
                     toast("Copied")
                 }
                 Tile("Save to gallery", Color(0xFF333333), Icons.Default.Download) {
-                    if (v.project != null) toast("Edits are played inside Twirlly. Export is coming later.")
+                    if (v.project != null) {
+                        val proj = try { projectFromJson(v.project) } catch (e: Exception) { null }
+                        if (proj == null) toast("Could not open this edit")
+                        else if (android.os.Build.VERSION.SDK_INT < 29) toast("Saving needs Android 10 or newer")
+                        else { toast("Saving..."); Exporter.export(ctx, proj, { }) { _, msg -> toast(msg) } }
+                    }
                     else scope.launch {
                         val files = if (v.images.isNotEmpty()) v.images else listOf(v.url)
                         val ok = withContext(Dispatchers.IO) { files.all { saveToGallery(ctx, it, !v.isImage) } }
