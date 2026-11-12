@@ -17,8 +17,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlin.math.sqrt
 
-private class BadgeItem(val emoji: String, val name: String, val how: String, val earned: Boolean)
-private class Challenge(val title: String, val have: Int, val goal: Int)
+private data class BadgeItem(val emoji: String, val name: String, val how: String, val earned: Boolean)
+private data class Challenge(val title: String, val have: Int, val goal: Int)
 
 /** Level, streak, badges and weekly challenges. Everything is worked out from what you did in the app. */
 @Composable
@@ -42,12 +42,14 @@ fun RewardsDialog(vm: AppViewModel, onDismiss: () -> Unit) {
     val week = 7L * 24 * 60 * 60 * 1000
     val now = System.currentTimeMillis()
     fun count(type: Int) = events.count { it.type == type && now - it.time < week }
+    
     val challenges = listOf(
         Challenge("Post 3 times", count(6), 3),
         Challenge("Like 10 posts", count(1), 10),
         Challenge("Write 3 comments", count(2), 3),
         Challenge("Follow 2 creators", count(5), 2)
     )
+    
     val badges = listOf(
         BadgeItem("🎬", "First post", "Post something", posts >= 1),
         BadgeItem("✨", "Creator", "Post 10 times", posts >= 10),
@@ -60,6 +62,7 @@ fun RewardsDialog(vm: AppViewModel, onDismiss: () -> Unit) {
         BadgeItem("⭐", "Premium", "Go Premium", settings.premium),
         BadgeItem("✅", "Verified", "Get verified", profile.verified)
     )
+    
     val brand = Brush.horizontalGradient(listOf(Color(0xFFFF2D87), Color(0xFF7B2FF7)))
 
     AlertDialog(
