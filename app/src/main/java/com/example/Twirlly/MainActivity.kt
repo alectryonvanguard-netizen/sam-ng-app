@@ -202,6 +202,7 @@ fun TwirllyApp(vm: AppViewModel) {
                 is Overlay.Editor -> EditorScreen(
                     vm = vm,
                     uris = o.uris,
+                    draft = o.draft,
                     onClose = { overlay = null },
                     onPosted = {
                         overlay = null
