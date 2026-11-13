@@ -22,6 +22,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
+/** How long the small Twirlly mark shows at the end of a video inside the app. */
+const val WATERMARK_MS = 2500L
+
 /** Small Twirlly logo and name. */
 @Composable
 fun TwirllyMark(modifier: Modifier = Modifier) {
