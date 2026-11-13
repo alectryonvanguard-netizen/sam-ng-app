@@ -376,7 +376,7 @@ private fun AudioClipPlayer(a: AudioClip, clipsEnd: Long, tMs: Long, playing: Bo
 
 /** Plays a posted edit inside the feed, looping. */
 @Composable
-fun ProjectPlayer(json: String, id: Long, playing: Boolean, muted: Boolean, onProgress: (Float) -> Unit) {
+fun ProjectPlayer(json: String, id: Long, playing: Boolean, muted: Boolean, forceFit: Boolean = false, onProgress: (Float) -> Unit) {
     val p = remember(id) { projectFromJson(json) }
     val total = remember(p) { p.totalMs().coerceAtLeast(1L) }
     var t by remember(id) { mutableLongStateOf(0L) }
@@ -393,5 +393,5 @@ fun ProjectPlayer(json: String, id: Long, playing: Boolean, muted: Boolean, onPr
             }
         }
     }
-    CompositionCanvas(p, t, run, muted, p.ratio() > 0.7f, null, null, Modifier.fillMaxSize())
+    CompositionCanvas(p, t, run, muted, forceFit || p.ratio() > 0.7f, null, null, Modifier.fillMaxSize())
 }
