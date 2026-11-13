@@ -92,7 +92,7 @@ fun ShareSheet(v: Video, vm: AppViewModel, onDismiss: () -> Unit) {
                         val proj = try { projectFromJson(v.project) } catch (e: Exception) { null }
                         if (proj == null) toast("Could not open this edit")
                         else if (android.os.Build.VERSION.SDK_INT < 29) toast("Saving needs Android 10 or newer")
-                        else { toast("Saving..."); Exporter.export(ctx, proj, { }) { _, msg -> toast(msg) } }
+                        else { toast("Saving..."); Exporter.export(ctx, proj, v.user, { }) { _, msg -> toast(msg) } }
                     }
                     else scope.launch {
                         val files = if (v.images.isNotEmpty()) v.images else listOf(v.url)
