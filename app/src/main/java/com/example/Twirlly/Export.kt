@@ -9,6 +9,7 @@ import android.graphics.Path
 import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.Typeface
+import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import androidx.media3.common.Effect
@@ -28,14 +29,19 @@ import androidx.media3.transformer.ProgressHolder
 import androidx.media3.transformer.Transformer
 import com.google.common.collect.ImmutableList
 import java.io.File
+import java.io.FileOutputStream
+import kotlin.math.abs
+import kotlin.math.max
 
-/** How long the Twirlly mark stays at the end of every saved video. */
-const val WATERMARK_MS = 2500L
+/** How long the Twirlly end screen lasts in a saved video. */
+const val END_CARD_MS = 2000L
 
 /**
- * Saves a project as an MP4 in the gallery (Movies/Twirlly) with a small Twirlly mark at the end.
+ * Saves a project as an MP4 in the gallery (Movies/Twirlly), the way TikTok and Instagram do:
+ * a small Twirlly mark with your @username that moves from the top left to the bottom right during the video,
+ * and a Twirlly end screen with your @username at the very end.
  * Included: clips with trim and filter, text and emoji layers, music and voice-overs.
- * Not included yet: transitions, keyframe motion, effects track, speed changes and photo/video stickers.
+ * Not included yet: transitions, keyframe motion, the effects track, speed changes and photo/video stickers.
  */
 object Exporter {
     private var transformer: Transformer? = null
@@ -54,19 +60,22 @@ object Exporter {
     }
 
     /** Call from the main thread. */
-    fun export(ctx: Context, project: Project, onProgress: (Int) -> Unit, onDone: (Boolean, String) -> Unit) {
+    fun export(ctx: Context, project: Project, username: String, onProgress: (Int) -> Unit, onDone: (Boolean, String) -> Unit) {
         val app = ctx.applicationContext
         val out = File(app.cacheDir, "export_" + System.currentTimeMillis() + ".mp4")
+        val size = outputSize(project)
+        val card: File? = try { makeEndCard(app, size.first, size.second, username) } catch (e: Exception) { null }
 
         fun finish(ok: Boolean, msg: String) {
             stopPoll()
             transformer = null
+            card?.delete()
             onDone(ok, msg)
         }
 
         fun attempt(removeAudio: Boolean) {
             val comp = try {
-                buildComposition(app, project, removeAudio)
+                buildComposition(project, username, size.first, size.second, card, removeAudio)
             } catch (e: Exception) {
                 finish(false, "Could not prepare the video")
                 return
@@ -124,8 +133,12 @@ object Exporter {
         return if (first != null && first.w > first.h && first.h > 0) Pair(1280, 720) else Pair(720, 1280)
     }
 
-    private fun buildComposition(ctx: Context, p: Project, removeAudio: Boolean): Composition {
-        val items = p.clips.map { c ->
+    private fun buildComposition(p: Project, username: String, w: Int, h: Int, card: File?, removeAudio: Boolean): Composition {
+        val total = p.clips.sumOf { clipMs(it) }
+        val shared = HashMap<String, Bitmap>()
+        var offset = 0L
+        val items = ArrayList<EditedMediaItem>()
+        for (c in p.clips) {
             val uri = mediaUri(c.path)
             val mediaItem = if (c.isVideo) {
                 MediaItem.Builder().setUri(uri)
@@ -139,25 +152,39 @@ object Exporter {
             val b = EditedMediaItem.Builder(mediaItem)
             if (!c.isVideo) b.setFrameRate(30)
             if (c.isVideo && removeAudio) b.setRemoveAudio(true)
+
+            val fx = ArrayList<Effect>()
             val arr = filterArray(c.filter)
             if (arr != null) {
                 val m = floatArrayOf(
                     arr[0], arr[5], arr[10], arr[15], arr[1], arr[6], arr[11], arr[16],
                     arr[2], arr[7], arr[12], arr[17], arr[3], arr[8], arr[13], arr[18]
                 )
-                val rgb = object : RgbMatrix {
+                fx.add(object : RgbMatrix {
                     override fun getMatrix(presentationTimeUs: Long, useHdr: Boolean): FloatArray = m
-                }
-                b.setEffects(Effects(emptyList(), listOf<Effect>(rgb)))
+                })
             }
-            b.build()
+            fx.add(Presentation.createForWidthAndHeight(w, h, Presentation.LAYOUT_SCALE_TO_FIT_WITH_CROP))
+            fx.add(OverlayEffect(ImmutableList.of(ExportOverlay(p, username, total, w, h, offset, shared))))
+            b.setEffects(Effects(emptyList(), fx))
+            items.add(b.build())
+            offset += clipMs(c)
         }
-        val total = p.clips.sumOf { clipMs(it) }
+
+        // Twirlly end screen
+        if (card != null) {
+            val cardItem = MediaItem.Builder().setUri(Uri.fromFile(card)).setImageDurationMs(END_CARD_MS).build()
+            items.add(
+                EditedMediaItem.Builder(cardItem).setFrameRate(30)
+                    .setEffects(Effects(emptyList(), listOf<Effect>(Presentation.createForWidthAndHeight(w, h, Presentation.LAYOUT_SCALE_TO_FIT_WITH_CROP))))
+                    .build()
+            )
+        }
         val sequences = mutableListOf(EditedMediaItemSequence(items))
 
         // music and voice-overs, one after another from the start
-        var room = total
-        val audioItems = mutableListOf<EditedMediaItem>()
+        var room = total + (if (card != null) END_CARD_MS else 0L)
+        val audioItems = ArrayList<EditedMediaItem>()
         for (a in p.audios.sortedBy { it.startMs }) {
             if (room <= 300L) break
             val len = (a.outMs - a.inMs).coerceAtLeast(300L)
@@ -171,38 +198,100 @@ object Exporter {
             room -= take
         }
         if (audioItems.isNotEmpty()) sequences.add(EditedMediaItemSequence(audioItems))
-
-        val (w, h) = outputSize(p)
-        val overlay = ExportOverlay(p, total, w, h)
-        val video = listOf<Effect>(
-            Presentation.createForWidthAndHeight(w, h, Presentation.LAYOUT_SCALE_TO_FIT_WITH_CROP),
-            OverlayEffect(ImmutableList.of(overlay))
-        )
-        return Composition.Builder(sequences).setEffects(Effects(emptyList(), video)).build()
+        return Composition.Builder(sequences).build()
     }
 }
 
-/** Draws the text and emoji layers and the Twirlly mark on a see-through picture the size of the video. */
-private class ExportOverlay(val p: Project, val total: Long, val w: Int, val h: Int) : BitmapOverlay() {
-    private val cache = HashMap<String, Bitmap>()
-    private val empty: Bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+/** The Twirlly logo: a gradient tile with a play button and two swirls. */
+private fun drawLogo(c: Canvas, x0: Float, y0: Float, u: Float, alpha: Float) {
+    val a = (255 * alpha).toInt().coerceIn(0, 255)
+    val bg = Paint(Paint.ANTI_ALIAS_FLAG)
+    bg.shader = LinearGradient(x0, y0, x0 + u, y0 + u, intArrayOf(0xFFFF2D87.toInt(), 0xFFB026FF.toInt(), 0xFF3D5AFE.toInt()), null, Shader.TileMode.CLAMP)
+    bg.alpha = a
+    c.drawRoundRect(RectF(x0, y0, x0 + u, y0 + u), u * 0.28f, u * 0.28f, bg)
+
+    val white = Paint(Paint.ANTI_ALIAS_FLAG)
+    white.color = 0xFFFFFFFF.toInt()
+    white.alpha = a
+    val tri = Path()
+    tri.moveTo(x0 + u * 0.40f, y0 + u * 0.31f)
+    tri.lineTo(x0 + u * 0.40f, y0 + u * 0.69f)
+    tri.lineTo(x0 + u * 0.70f, y0 + u * 0.50f)
+    tri.close()
+    c.drawPath(tri, white)
+
+    val arc = Paint(Paint.ANTI_ALIAS_FLAG)
+    arc.color = 0xFFFFFFFF.toInt()
+    arc.alpha = a
+    arc.style = Paint.Style.STROKE
+    arc.strokeWidth = u * 0.07f
+    arc.strokeCap = Paint.Cap.ROUND
+    val oval = RectF(x0 + u * 0.16f, y0 + u * 0.16f, x0 + u * 0.84f, y0 + u * 0.84f)
+    c.drawArc(oval, 150f, 140f, false, arc)
+    c.drawArc(oval, 330f, 140f, false, arc)
+}
+
+private fun textPaint(size: Float, bold: Boolean, alpha: Float): Paint {
+    val p = Paint(Paint.ANTI_ALIAS_FLAG)
+    p.color = 0xFFFFFFFF.toInt()
+    p.typeface = Typeface.create(Typeface.DEFAULT, if (bold) Typeface.BOLD else Typeface.NORMAL)
+    p.textSize = size
+    p.setShadowLayer(size * 0.2f, 0f, 0f, 0x99000000.toInt())
+    p.alpha = (255 * alpha).toInt().coerceIn(0, 255)
+    return p
+}
+
+/** The picture shown for two seconds at the end of every saved video. */
+private fun makeEndCard(ctx: Context, w: Int, h: Int, username: String): File {
+    val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+    val c = Canvas(bmp)
+    val bg = Paint()
+    bg.shader = LinearGradient(0f, 0f, 0f, h.toFloat(), intArrayOf(0xFF0A0A0F.toInt(), 0xFF2A0B3D.toInt(), 0xFF0B1B3A.toInt()), null, Shader.TileMode.CLAMP)
+    c.drawRect(0f, 0f, w.toFloat(), h.toFloat(), bg)
+    val short = minOf(w, h).toFloat()
+    val u = short * 0.30f
+    val cx = w / 2f
+    drawLogo(c, cx - u / 2f, h * 0.36f - u / 2f, u, 1f)
+    val name = textPaint(short * 0.13f, true, 1f)
+    c.drawText("Twirlly", cx - name.measureText("Twirlly") / 2f, h * 0.36f + u * 0.5f + short * 0.17f, name)
+    val user = textPaint(short * 0.06f, false, 0.9f)
+    val handle = "@" + username
+    c.drawText(handle, cx - user.measureText(handle) / 2f, h * 0.36f + u * 0.5f + short * 0.27f, user)
+    val tag = textPaint(short * 0.045f, false, 0.65f)
+    val tagline = "Create. Edit. Share."
+    c.drawText(tagline, cx - tag.measureText(tagline) / 2f, h * 0.36f + u * 0.5f + short * 0.36f, tag)
+    val f = File(ctx.cacheDir, "endcard_" + System.currentTimeMillis() + ".png")
+    FileOutputStream(f).use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+    bmp.recycle()
+    return f
+}
+
+/**
+ * Text and emoji layers plus the moving Twirlly mark, drawn on a see-through picture the size of the video.
+ * [offsetMs] is where this clip starts in the whole video, so the mark and layers stay in step across clips.
+ */
+private class ExportOverlay(
+    val p: Project, val username: String, val total: Long, val w: Int, val h: Int,
+    val offsetMs: Long, val cache: HashMap<String, Bitmap>
+) : BitmapOverlay() {
     private val layers = p.layers.filter { it.image == null && !it.video && it.text.isNotBlank() }
 
     override fun getBitmap(presentationTimeUs: Long): Bitmap {
-        val ms = presentationTimeUs / 1000
+        val ms = offsetMs + presentationTimeUs / 1000
         val visible = layers.filter { ms >= it.startMs && ms <= it.endMs }
-        val remain = total - ms
-        val fade = if (remain <= WATERMARK_MS) ((WATERMARK_MS - remain) / 400f).coerceIn(0f, 1f) else 0f
-        val step = (fade * 8).toInt()
-        if (visible.isEmpty() && step == 0) return empty
-        val key = visible.joinToString(",") { it.id.toString() } + "|" + step
-        return cache.getOrPut(key) {
-            val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-            val c = Canvas(bmp)
-            visible.forEach { drawLayer(c, it) }
-            if (step > 0) drawMark(c, step / 8f)
-            bmp
-        }
+        val mid = total / 2
+        val phase = if (ms < mid) 0 else 1
+        // the mark fades out and back in while it jumps to the other corner
+        val aStep = (abs(ms - mid) / 300f).coerceIn(0f, 1f).let { (it * 4).toInt() }
+        val key = visible.joinToString(",") { it.id.toString() } + "|" + phase + "|" + aStep
+        cache[key]?.let { return it }
+        if (cache.size > 16) cache.clear()
+        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val c = Canvas(bmp)
+        visible.forEach { drawLayer(c, it) }
+        if (aStep > 0) drawMark(c, phase, 0.92f * aStep / 4f)
+        cache[key] = bmp
+        return bmp
     }
 
     private fun drawLayer(c: Canvas, l: Layer) {
@@ -237,45 +326,20 @@ private class ExportOverlay(val p: Project, val total: Long, val w: Int, val h: 
         c.restore()
     }
 
-    /** Small Twirlly logo and name at the bottom right. */
-    private fun drawMark(c: Canvas, alpha: Float) {
-        val u = w * 0.075f
-        val text = Paint(Paint.ANTI_ALIAS_FLAG)
-        text.color = 0xFFFFFFFF.toInt()
-        text.typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-        text.textSize = u * 0.62f
-        text.setShadowLayer(8f, 0f, 0f, 0x99000000.toInt())
-        text.alpha = (255 * alpha).toInt()
-        val tw = text.measureText("Twirlly")
-        val gap = u * 0.3f
-        val x0 = w - w * 0.045f - (u + gap + tw)
-        val y0 = h - h * 0.11f - u
-
-        val bg = Paint(Paint.ANTI_ALIAS_FLAG)
-        bg.shader = LinearGradient(x0, y0, x0 + u, y0 + u, intArrayOf(0xFFFF2D87.toInt(), 0xFFB026FF.toInt(), 0xFF3D5AFE.toInt()), null, Shader.TileMode.CLAMP)
-        bg.alpha = (255 * alpha).toInt()
-        c.drawRoundRect(RectF(x0, y0, x0 + u, y0 + u), u * 0.28f, u * 0.28f, bg)
-
-        val white = Paint(Paint.ANTI_ALIAS_FLAG)
-        white.color = 0xFFFFFFFF.toInt()
-        white.alpha = (255 * alpha).toInt()
-        val tri = Path()
-        tri.moveTo(x0 + u * 0.40f, y0 + u * 0.31f)
-        tri.lineTo(x0 + u * 0.40f, y0 + u * 0.69f)
-        tri.lineTo(x0 + u * 0.70f, y0 + u * 0.50f)
-        tri.close()
-        c.drawPath(tri, white)
-
-        val arc = Paint(Paint.ANTI_ALIAS_FLAG)
-        arc.color = 0xFFFFFFFF.toInt()
-        arc.alpha = (255 * alpha).toInt()
-        arc.style = Paint.Style.STROKE
-        arc.strokeWidth = u * 0.07f
-        arc.strokeCap = Paint.Cap.ROUND
-        val oval = RectF(x0 + u * 0.16f, y0 + u * 0.16f, x0 + u * 0.84f, y0 + u * 0.84f)
-        c.drawArc(oval, 150f, 140f, false, arc)
-        c.drawArc(oval, 330f, 140f, false, arc)
-
-        c.drawText("Twirlly", x0 + u + gap, y0 + u / 2f - (text.ascent() + text.descent()) / 2f, text)
+    /** Logo, "Twirlly" and "@username". Top left in the first half, bottom right in the second half. */
+    private fun drawMark(c: Canvas, phase: Int, alpha: Float) {
+        val u = minOf(w, h) * 0.085f
+        val t1 = textPaint(u * 0.46f, true, alpha)
+        val t2 = textPaint(u * 0.34f, false, alpha * 0.95f)
+        val handle = "@" + username
+        val gap = u * 0.25f
+        val tw = max(t1.measureText("Twirlly"), t2.measureText(handle))
+        val total = u + gap + tw
+        val margin = minOf(w, h) * 0.045f
+        val x0 = if (phase == 0) margin else w - margin - total
+        val y0 = if (phase == 0) h * 0.075f else h - h * 0.13f - u
+        drawLogo(c, x0, y0, u, alpha)
+        c.drawText("Twirlly", x0 + u + gap, y0 + u * 0.46f, t1)
+        c.drawText(handle, x0 + u + gap, y0 + u * 0.92f, t2)
     }
 }
