@@ -731,7 +731,7 @@ private fun EditorBody(vm: AppViewModel, uris: List<Uri>, draft: String?, onClos
         if (Build.VERSION.SDK_INT < 29) { toast("Saving needs Android 10 or newer"); return }
         exporting = true
         exportPct = 0
-        Exporter.export(ctx, project, vm.profile.value.name, !(vm.settings.value.premium && !vm.settings.value.watermark), { exportPct = it }) { _, msg -> exporting = false; toast(msg) }
+        Exporter.export(ctx, project, vm.profile.value.name, (!vm.settings.value.premium || vm.settings.value.keepWatermark), { exportPct = it }) { _, msg -> exporting = false; toast(msg) }
     }
 
     fun addFx(kind: Int) {
