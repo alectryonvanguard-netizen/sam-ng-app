@@ -256,35 +256,6 @@ private fun FloatingEmoji(f: Floater, onDone: () -> Unit) {
 }
 
 @Composable
-private fun GiftBurst(b: Burst, onDone: () -> Unit) {
-    val p = remember { Animatable(0f) }
-    LaunchedEffect(Unit) { p.animateTo(1f, tween(2600, easing = LinearEasing)); onDone() }
-    val t = p.value
-    val sc = when {
-        t < 0.15f -> t / 0.15f * 1.4f
-        t < 0.25f -> 1.4f - (t - 0.15f) / 0.1f * 0.4f
-        else -> 1f + 0.05f * sin(t * 20f)
-    }
-    val alpha = if (t > 0.8f) ((1f - t) / 0.2f).coerceIn(0f, 1f) else 1f
-    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        if (b.gift.big) Canvas(Modifier.fillMaxSize()) {
-            for (i in 0 until 18) {
-                val ang = i * (2f * PI.toFloat() / 18f)
-                val d = 120f + t * 520f
-                drawCircle(Color(0xFFFFD166).copy(alpha = alpha * 0.9f), 6f + 7f * (1f - t), Off(center.x + cos(ang) * d, center.y + sin(ang) * d))
-            }
-        }
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            modifier = Modifier.graphicsLayer { scaleX = sc; scaleY = sc; this.alpha = alpha }
-        ) {
-            Text(b.gift.emoji, fontSize = if (b.gift.big) 140.sp else 90.sp)
-            Text(b.from + " sent " + b.gift.name, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 18.sp, style = TextStyle(shadow = SOFT_SHADOW))
-        }
-    }
-}
-
-@Composable
 private fun StickerView(s: LiveSticker, onRemove: () -> Unit) {
     Text(
         s.emoji, fontSize = 56.sp,
@@ -733,7 +704,7 @@ fun LiveScreen(vm: AppViewModel, preview: Boolean, onClose: () -> Unit) {
             }
         }
 
-        bursts.lastOrNull()?.let { b -> key(b.id) { GiftBurst(b) { bursts.remove(b) } } }
+        bursts.lastOrNull()?.let { b -> key(b.id) { GiftEffect(b.gift.name, b.gift.emoji, b.from) { bursts.remove(b) } } }
 
         if (countdown > 0) {
             Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.45f)), contentAlignment = Alignment.Center) {
