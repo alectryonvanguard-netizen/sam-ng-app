@@ -11,12 +11,33 @@
         <package android:name="com.facebook.orca" />
         <package android:name="com.instagram.android" />
         <package android:name="com.twitter.android" />
+        <package android:name="com.facebook.katana" />
+        <package android:name="com.snapchat.android" />
+        <package android:name="com.instagram.barcelona" />
+        <package android:name="com.linkedin.android" />
+        <package android:name="com.discord" />
+        <package android:name="com.reddit.frontpage" />
+        <package android:name="org.thoughtcrime.securesms" />
+        <package android:name="com.viber.voip" />
+        <package android:name="jp.naver.line.android" />
+        <package android:name="com.tencent.mm" />
+        <package android:name="com.pinterest" />
+        <package android:name="com.google.android.gm" />
+        <intent>
+            <action android:name="android.intent.action.SENDTO" />
+            <data android:scheme="smsto" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.SENDTO" />
+            <data android:scheme="mailto" />
+        </intent>
     </queries>
     <application
         android:icon="@mipmap/ic_launcher"
         android:label="Twirlly"
         android:theme="@style/Theme.Twirlly">
         <activity
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|density|uiMode"
             android:name=".MainActivity"
             android:exported="true"
             android:windowSoftInputMode="adjustResize">
