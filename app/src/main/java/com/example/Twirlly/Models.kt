@@ -83,7 +83,7 @@ const val STORAGE_LIMIT = 5_000_000L
 
 data class AppSettings(
     val email: String = "",
-    val watermark: Boolean = true,
+    val keepWatermark: Boolean = false,
     val devMode: Boolean = false,
     val breakHours: Int = 2,
     val kidsMode: Boolean = false,
@@ -296,7 +296,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 _settings.value = AppSettings(
                     notifications = s.optBoolean("notif", true), autoplay = s.optBoolean("auto", true),
                     muted = s.optBoolean("muted", false), theme = s.optInt("theme", 0), accent = s.optInt("accent", 0),
-                    onboarded = s.optBoolean("onb", false), premium = s.optBoolean("prem", false), email = s.optString("email", ""), coins = s.optInt("coins", 0), breakHours = s.optInt("brk", 2), watermark = s.optBoolean("wm", true), devMode = s.optBoolean("dev", false), kidsMode = s.optBoolean("kids", false), pinHash = s.optString("pin", ""), bedtimeOn = s.optBoolean("bed", false), bedStart = s.optInt("bedS", 22), bedEnd = s.optInt("bedE", 6), streak = s.optInt("streak", 0), bestStreak = s.optInt("best", 0), lastDay = s.optLong("lday", 0L)
+                    onboarded = s.optBoolean("onb", false), premium = s.optBoolean("prem", false), email = s.optString("email", ""), coins = s.optInt("coins", 0), breakHours = s.optInt("brk", 2), keepWatermark = s.optBoolean("keepwm", false), devMode = s.optBoolean("dev", false), kidsMode = s.optBoolean("kids", false), pinHash = s.optString("pin", ""), bedtimeOn = s.optBoolean("bed", false), bedStart = s.optInt("bedS", 22), bedEnd = s.optInt("bedE", 6), streak = s.optInt("streak", 0), bestStreak = s.optInt("best", 0), lastDay = s.optLong("lday", 0L)
                 )
             }
             watchedSecs = o.optLong("watch", 0L)
@@ -334,7 +334,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             .put("avatar", p.avatar ?: "").put("banner", p.banner ?: "").put("bv", p.bannerVideo).put("bs", p.bannerStartMs).put("bsc", p.bannerScale.toDouble()).put("box", p.bannerOx.toDouble()).put("boy", p.bannerOy.toDouble()).put("ver", p.verified).put("vreq", p.verifyRequest).put("nca", p.nameChangedAt).put("uca", p.usernameChangedAt).put("private", p.isPrivate))
         val s = _settings.value
         put("settings", JSONObject().put("notif", s.notifications).put("auto", s.autoplay).put("muted", s.muted)
-            .put("theme", s.theme).put("accent", s.accent).put("onb", s.onboarded).put("prem", s.premium).put("email", s.email).put("coins", s.coins).put("brk", s.breakHours).put("wm", s.watermark).put("dev", s.devMode).put("kids", s.kidsMode).put("pin", s.pinHash).put("bed", s.bedtimeOn).put("bedS", s.bedStart).put("bedE", s.bedEnd).put("streak", s.streak).put("best", s.bestStreak).put("lday", s.lastDay))
+            .put("theme", s.theme).put("accent", s.accent).put("onb", s.onboarded).put("prem", s.premium).put("email", s.email).put("coins", s.coins).put("brk", s.breakHours).put("keepwm", s.keepWatermark).put("dev", s.devMode).put("kids", s.kidsMode).put("pin", s.pinHash).put("bed", s.bedtimeOn).put("bedS", s.bedStart).put("bedE", s.bedEnd).put("streak", s.streak).put("best", s.bestStreak).put("lday", s.lastDay))
         put("watch", watchedSecs)
         put("drafts", JSONArray().also { a -> _drafts.value.forEach { a.put(JSONObject().put("id", it.id).put("t", it.title).put("j", it.json).put("at", it.savedAt)) } })
         put("playlists", JSONObject().also { po -> _playlists.value.forEach { (k, v) -> po.put(k, JSONArray(v)) } })
@@ -529,7 +529,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         appendLine("Android " + android.os.Build.VERSION.RELEASE + " (API " + android.os.Build.VERSION.SDK_INT + "), " + android.os.Build.MANUFACTURER + " " + android.os.Build.MODEL)
         appendLine("Own posts: " + _videos.value.count { it.local } + ", drafts: " + _drafts.value.size + ", playlists: " + _playlists.value.size)
         appendLine("Storage used: " + mediaBytes() + " of " + STORAGE_LIMIT + " bytes")
-        appendLine("Premium: " + st.premium + ", watermark: " + st.watermark + ", kids mode: " + st.kidsMode + ", bedtime: " + st.bedtimeOn + ", break hours: " + st.breakHours)
+        appendLine("Premium: " + st.premium + ", keep watermark: " + st.keepWatermark + ", kids mode: " + st.kidsMode + ", bedtime: " + st.bedtimeOn + ", break hours: " + st.breakHours)
         appendLine("Watched today: " + ((watchLog[dayKey(System.currentTimeMillis())] ?: 0L) / 60) + " min")
     }
 
