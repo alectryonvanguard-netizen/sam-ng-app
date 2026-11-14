@@ -87,6 +87,8 @@ fun SettingsScreen(vm: AppViewModel, onBack: () -> Unit, onEditProfile: () -> Un
     val ctx = LocalContext.current
     val s by vm.settings.collectAsState()
     val profile by vm.profile.collectAsState()
+    val blocked by vm.blocked.collectAsState()
+    var blockedOpen by remember { mutableStateOf(false) }
     var legal by remember { mutableStateOf<String?>(null) }
     var premiumOpen by remember { mutableStateOf(false) }
     var insightsOpen by remember { mutableStateOf(false) }
@@ -183,6 +185,7 @@ fun SettingsScreen(vm: AppViewModel, onBack: () -> Unit, onEditProfile: () -> Un
                 Row3(Icons.Default.AccountCircle, if (s.email.isBlank()) "Guest mode" else s.email, if (s.email.isBlank()) "Sign in from the welcome page after logging out" else "Signed in")
                 Row3(Icons.Default.Verified, if (profile.verified) "Verified" else "Request a verified badge", if (profile.verified) "Your account is verified" else if (profile.verifyRequest.isNotBlank()) "Request saved" else "For businesses and known creators", onClick = { verifyOpen = true })
                 Row3(Icons.Default.EmojiEvents, "Rewards and level", "Streak, badges and weekly challenges", onClick = { rewardsOpen = true })
+                Row3(Icons.Default.Block, "Blocked accounts", if (blocked.isEmpty()) "Nobody is blocked" else blocked.size.toString() + " blocked", onClick = { blockedOpen = true })
                 Row3(Icons.Default.Backup, "Back up to a file", "Save your profile and posts", onClick = { createBackup.launch("twirlly-backup.json") })
                 Row3(Icons.Default.Restore, "Restore from a backup", "Pick a backup file", onClick = { restoreBackup.launch(arrayOf("*/*")) })
                 Row3(Icons.AutoMirrored.Filled.ExitToApp, "Log out", "You will be asked to confirm", onClick = { confirmOut = true })
@@ -286,6 +289,24 @@ fun SettingsScreen(vm: AppViewModel, onBack: () -> Unit, onEditProfile: () -> Un
     if (screenTimeOpen) ScreenTimeDialog(vm) { screenTimeOpen = false }
     if (verifyOpen) VerificationDialog(vm) { verifyOpen = false }
     if (rewardsOpen) RewardsDialog(vm) { rewardsOpen = false }
+    if (blockedOpen) {
+        AlertDialog(
+            onDismissRequest = { blockedOpen = false },
+            title = { Text("Blocked accounts") },
+            text = {
+                Column {
+                    if (blocked.isEmpty()) Text("You have not blocked anyone.")
+                    blocked.forEach { u ->
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("@" + u, Modifier.weight(1f))
+                            TextButton(onClick = { vm.unblockUser(u) }) { Text("Unblock") }
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { blockedOpen = false }) { Text("Close") } }
+        )
+    }
     if (kidsSetup) SetPinDialog(onDismiss = { kidsSetup = false }) { pin -> vm.setKids(pin); kidsSetup = false }
     if (confirmOut) {
         AlertDialog(
