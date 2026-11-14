@@ -185,7 +185,7 @@ fun SettingsScreen(vm: AppViewModel, onBack: () -> Unit, onEditProfile: () -> Un
                 })
                 Row3(Icons.Default.AccountCircle, if (s.email.isBlank()) "Guest mode" else s.email, if (s.email.isBlank()) "Sign in from the welcome page after logging out" else "Signed in")
                 Row3(Icons.Default.Verified, if (profile.verified) "Verified" else "Request a verified badge", if (profile.verified) "Your account is verified" else if (profile.verifyRequest.isNotBlank()) "Request saved" else "For businesses and known creators", onClick = { verifyOpen = true })
-                if (s.premium) SwitchRow(Icons.Default.BrandingWatermark, "Twirlly watermark", "Show the mark and end logo on videos you save", s.watermark) { v -> vm.updateSettings { it.copy(watermark = v) } }
+                if (s.premium) SwitchRow(Icons.Default.BrandingWatermark, "Keep the Twirlly watermark", "Premium videos are saved without it. Turn on to keep it", s.keepWatermark) { v -> vm.updateSettings { it.copy(keepWatermark = v) } }
                 else Row3(Icons.Default.BrandingWatermark, "Twirlly watermark", "Premium can remove it from saved videos", onClick = { premiumOpen = true })
                 Row3(Icons.Default.EmojiEvents, "Rewards and level", "Streak, badges and weekly challenges", onClick = { rewardsOpen = true })
                 Row3(Icons.Default.Block, "Blocked accounts", if (blocked.isEmpty()) "Nobody is blocked" else blocked.size.toString() + " blocked", onClick = { blockedOpen = true })
