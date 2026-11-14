@@ -33,13 +33,14 @@ import java.io.FileOutputStream
 import kotlin.math.abs
 import kotlin.math.max
 
-/** How long the Twirlly end screen lasts in a saved video. */
-const val END_CARD_MS = 2000L
+/** How long the big Twirlly logo stays over the end of a saved video. */
+const val END_LOGO_MS = 2200L
 
 /**
  * Saves a project as an MP4 in the gallery (Movies/Twirlly), the way TikTok and Instagram do:
  * a small Twirlly mark with your @username that moves from the top left to the bottom right during the video,
- * and a Twirlly end screen with your @username at the very end.
+ * and the big Twirlly logo with your @username over the last seconds, on a see-through dark layer.
+ * Premium can switch the mark off (watermark = false).
  * Included: clips with trim and filter, text and emoji layers, music and voice-overs.
  * Not included yet: transitions, keyframe motion, the effects track, speed changes and photo/video stickers.
  */
@@ -60,26 +61,22 @@ object Exporter {
     }
 
     /** Call from the main thread. */
-    fun export(ctx: Context, project: Project, username: String, onProgress: (Int) -> Unit, onDone: (Boolean, String) -> Unit) {
+    fun export(ctx: Context, project: Project, username: String, watermark: Boolean, onProgress: (Int) -> Unit, onDone: (Boolean, String) -> Unit) {
         val app = ctx.applicationContext
         val out = File(app.cacheDir, "export_" + System.currentTimeMillis() + ".mp4")
         val size = outputSize(project)
-        val card: File? = try { makeEndCard(app, size.first, size.second, username) } catch (e: Exception) { null }
 
         fun finish(ok: Boolean, msg: String) {
             stopPoll()
             transformer = null
-            card?.delete()
             onDone(ok, msg)
         }
 
-        // If a try fails, the next try uses fewer extras, so a video is still saved on every phone:
-        // 0 = everything, 1 = without the clips' own sound, 2 = without the end screen, 3 = neither
+        // If the first try fails, the second one leaves out the clips' own sound
         fun attempt(step: Int) {
-            val removeAudio = step == 1 || step == 3
-            val useCard = step < 2
+            val removeAudio = step == 1
             val comp = try {
-                buildComposition(app, project, username, size.first, size.second, if (useCard) card else null, removeAudio)
+                buildComposition(app, project, username, watermark, size.first, size.second, removeAudio)
             } catch (e: Exception) {
                 finish(false, "Could not prepare the video")
                 return
@@ -92,19 +89,14 @@ object Exporter {
                     override fun onCompleted(composition: Composition, exportResult: ExportResult) {
                         val ok = saveToGallery(app, out.absolutePath, true)
                         out.delete()
-                        val note = when (step) {
-                            1 -> " (without the clip sound)"
-                            2 -> " (without the end screen)"
-                            3 -> " (without the end screen and clip sound)"
-                            else -> ""
-                        }
+                        val note = if (step == 1) " (without the clip sound)" else ""
                         finish(ok, if (ok) "Saved to your gallery (Movies/Twirlly)$note" else "Could not save to the gallery")
                     }
 
                     override fun onError(composition: Composition, exportResult: ExportResult, exportException: ExportException) {
                         out.delete()
                         stopPoll()
-                        if (step < 3) attempt(step + 1)
+                        if (step < 1) attempt(step + 1)
                         else finish(
                             false,
                             "Could not save the video (" + exportException.errorCodeName +
@@ -146,7 +138,7 @@ object Exporter {
         return if (first != null && first.w > first.h && first.h > 0) Pair(1280, 720) else Pair(720, 1280)
     }
 
-    private fun buildComposition(ctx: Context, p: Project, username: String, w: Int, h: Int, card: File?, removeAudio: Boolean): Composition {
+    private fun buildComposition(ctx: Context, p: Project, username: String, watermark: Boolean, w: Int, h: Int, removeAudio: Boolean): Composition {
         val total = p.clips.sumOf { clipMs(it) }
         val shared = HashMap<String, Bitmap>()
         var offset = 0L
@@ -181,25 +173,16 @@ object Exporter {
                 })
             }
             fx.add(Presentation.createForWidthAndHeight(w, h, Presentation.LAYOUT_SCALE_TO_FIT_WITH_CROP))
-            fx.add(OverlayEffect(ImmutableList.of(ExportOverlay(p, username, total, w, h, offset, shared))))
+            fx.add(OverlayEffect(ImmutableList.of(ExportOverlay(p, username, total, w, h, offset, shared, watermark))))
             b.setEffects(Effects(emptyList(), fx))
             items.add(b.build())
             offset += clipMs(c)
         }
 
-        // Twirlly end screen
-        if (card != null) {
-            val cardItem = MediaItem.Builder().setUri(Uri.fromFile(card)).setMimeType(MimeTypes.IMAGE_PNG).setImageDurationMs(END_CARD_MS).build()
-            items.add(
-                EditedMediaItem.Builder(cardItem).setFrameRate(30)
-                    .setEffects(Effects(emptyList(), listOf<Effect>(Presentation.createForWidthAndHeight(w, h, Presentation.LAYOUT_SCALE_TO_FIT_WITH_CROP))))
-                    .build()
-            )
-        }
         val sequences = mutableListOf(EditedMediaItemSequence(items))
 
         // music and voice-overs, one after another from the start
-        var room = total + (if (card != null) END_CARD_MS else 0L)
+        var room = total
         val audioItems = ArrayList<EditedMediaItem>()
         for (a in p.audios.sortedBy { it.startMs }) {
             if (room <= 300L) break
@@ -257,38 +240,13 @@ private fun textPaint(size: Float, bold: Boolean, alpha: Float): Paint {
     return p
 }
 
-/** The picture shown for two seconds at the end of every saved video. */
-private fun makeEndCard(ctx: Context, w: Int, h: Int, username: String): File {
-    val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-    val c = Canvas(bmp)
-    val bg = Paint()
-    bg.shader = LinearGradient(0f, 0f, 0f, h.toFloat(), intArrayOf(0xFF0A0A0F.toInt(), 0xFF2A0B3D.toInt(), 0xFF0B1B3A.toInt()), null, Shader.TileMode.CLAMP)
-    c.drawRect(0f, 0f, w.toFloat(), h.toFloat(), bg)
-    val short = minOf(w, h).toFloat()
-    val u = short * 0.30f
-    val cx = w / 2f
-    drawLogo(c, cx - u / 2f, h * 0.36f - u / 2f, u, 1f)
-    val name = textPaint(short * 0.13f, true, 1f)
-    c.drawText("Twirlly", cx - name.measureText("Twirlly") / 2f, h * 0.36f + u * 0.5f + short * 0.17f, name)
-    val user = textPaint(short * 0.06f, false, 0.9f)
-    val handle = "@" + username
-    c.drawText(handle, cx - user.measureText(handle) / 2f, h * 0.36f + u * 0.5f + short * 0.27f, user)
-    val tag = textPaint(short * 0.045f, false, 0.65f)
-    val tagline = "Create. Edit. Share."
-    c.drawText(tagline, cx - tag.measureText(tagline) / 2f, h * 0.36f + u * 0.5f + short * 0.36f, tag)
-    val f = File(ctx.cacheDir, "endcard_" + System.currentTimeMillis() + ".png")
-    FileOutputStream(f).use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
-    bmp.recycle()
-    return f
-}
-
 /**
  * Text and emoji layers plus the moving Twirlly mark, drawn on a see-through picture the size of the video.
  * [offsetMs] is where this clip starts in the whole video, so the mark and layers stay in step across clips.
  */
 private class ExportOverlay(
     val p: Project, val username: String, val total: Long, val w: Int, val h: Int,
-    val offsetMs: Long, val cache: HashMap<String, Bitmap>
+    val offsetMs: Long, val cache: HashMap<String, Bitmap>, val mark: Boolean
 ) : BitmapOverlay() {
     private val layers = p.layers.filter { it.image == null && !it.video && it.text.isNotBlank() }
 
@@ -297,17 +255,39 @@ private class ExportOverlay(
         val visible = layers.filter { ms >= it.startMs && ms <= it.endMs }
         val mid = total / 2
         val phase = if (ms < mid) 0 else 1
-        // the mark fades out and back in while it jumps to the other corner
-        val aStep = (abs(ms - mid) / 300f).coerceIn(0f, 1f).let { (it * 4).toInt() }
-        val key = visible.joinToString(",") { it.id.toString() } + "|" + phase + "|" + aStep
+        // the big logo comes over the last seconds; it fades in
+        val endLen = minOf(END_LOGO_MS, total / 2)
+        val endStart = total - endLen
+        val eStep = if (mark && ms >= endStart) (((ms - endStart) / 400f).coerceIn(0f, 1f) * 8).toInt() else 0
+        // the small mark fades out and back in while it jumps to the other corner, and goes away under the big logo
+        val aStep = if (!mark || eStep > 0) 0 else (abs(ms - mid) / 300f).coerceIn(0f, 1f).let { (it * 4).toInt() }
+        val key = visible.joinToString(",") { it.id.toString() } + "|" + phase + "|" + aStep + "|" + eStep
         cache[key]?.let { return it }
-        if (cache.size > 16) cache.clear()
+        if (cache.size > 12) cache.clear()
         val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         val c = Canvas(bmp)
         visible.forEach { drawLayer(c, it) }
         if (aStep > 0) drawMark(c, phase, 0.92f * aStep / 4f)
+        if (eStep > 0) drawEndLogo(c, eStep / 8f)
         cache[key] = bmp
         return bmp
+    }
+
+    /** See-through dark layer (the video still shows through) with the big logo, name and @username. */
+    private fun drawEndLogo(c: Canvas, alpha: Float) {
+        val scrim = Paint()
+        scrim.color = android.graphics.Color.argb((0.45f * alpha * 255).toInt().coerceIn(0, 255), 0, 0, 0)
+        c.drawRect(0f, 0f, w.toFloat(), h.toFloat(), scrim)
+        val short = minOf(w, h).toFloat()
+        val u = short * 0.26f
+        val cx = w / 2f
+        val top = h * 0.40f - u / 2f
+        drawLogo(c, cx - u / 2f, top, u, alpha)
+        val name = textPaint(short * 0.11f, true, alpha)
+        c.drawText("Twirlly", cx - name.measureText("Twirlly") / 2f, top + u + short * 0.14f, name)
+        val handle = "@" + username
+        val user = textPaint(short * 0.05f, false, alpha * 0.9f)
+        c.drawText(handle, cx - user.measureText(handle) / 2f, top + u + short * 0.22f, user)
     }
 
     private fun drawLayer(c: Canvas, l: Layer) {
