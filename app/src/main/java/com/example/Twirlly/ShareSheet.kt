@@ -157,7 +157,7 @@ fun ShareSheet(v: Video, vm: AppViewModel, onDismiss: () -> Unit) {
             val proj = try { projectFromJson(v.project) } catch (e: Exception) { null }
             if (proj == null) toast("Could not open this edit")
             else if (android.os.Build.VERSION.SDK_INT < 29) toast("Saving needs Android 10 or newer")
-            else { toast("Saving..."); Exporter.export(ctx, proj, v.user, !(settings.premium && !settings.watermark), { }) { _, msg -> toast(msg) } }
+            else { toast("Saving..."); Exporter.export(ctx, proj, v.user, (!settings.premium || settings.keepWatermark), { }) { _, msg -> toast(msg) } }
         } else scope.launch {
             val files = if (v.images.isNotEmpty()) v.images else listOf(v.url)
             val ok = withContext(Dispatchers.IO) { files.all { saveToGallery(ctx, it, !v.isImage) } }
