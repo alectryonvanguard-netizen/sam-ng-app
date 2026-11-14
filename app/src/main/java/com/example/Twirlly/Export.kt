@@ -73,9 +73,13 @@ object Exporter {
             onDone(ok, msg)
         }
 
-        fun attempt(removeAudio: Boolean) {
+        // If a try fails, the next try uses fewer extras, so a video is still saved on every phone:
+        // 0 = everything, 1 = without the clips' own sound, 2 = without the end screen, 3 = neither
+        fun attempt(step: Int) {
+            val removeAudio = step == 1 || step == 3
+            val useCard = step < 2
             val comp = try {
-                buildComposition(project, username, size.first, size.second, card, removeAudio)
+                buildComposition(app, project, username, size.first, size.second, if (useCard) card else null, removeAudio)
             } catch (e: Exception) {
                 finish(false, "Could not prepare the video")
                 return
@@ -88,15 +92,24 @@ object Exporter {
                     override fun onCompleted(composition: Composition, exportResult: ExportResult) {
                         val ok = saveToGallery(app, out.absolutePath, true)
                         out.delete()
-                        finish(ok, if (ok) "Saved to your gallery (Movies/Twirlly)" else "Could not save to the gallery")
+                        val note = when (step) {
+                            1 -> " (without the clip sound)"
+                            2 -> " (without the end screen)"
+                            3 -> " (without the end screen and clip sound)"
+                            else -> ""
+                        }
+                        finish(ok, if (ok) "Saved to your gallery (Movies/Twirlly)$note" else "Could not save to the gallery")
                     }
 
                     override fun onError(composition: Composition, exportResult: ExportResult, exportException: ExportException) {
                         out.delete()
                         stopPoll()
-                        // second try without the sound of the clips (mixing photos and videos can fail on some phones)
-                        if (!removeAudio) attempt(true)
-                        else finish(false, "Could not save the video: " + (exportException.message ?: "unknown error"))
+                        if (step < 3) attempt(step + 1)
+                        else finish(
+                            false,
+                            "Could not save the video (" + exportException.errorCodeName +
+                                (exportException.cause?.message?.let { ": " + it.take(90) } ?: "") + ")"
+                        )
                     }
                 })
                 .build()
@@ -119,7 +132,7 @@ object Exporter {
             poll = r
             main.postDelayed(r, 300)
         }
-        attempt(false)
+        attempt(0)
     }
 
     private fun clipMs(c: Clip): Long = (c.outMs - c.inMs).coerceAtLeast(300L)
@@ -133,7 +146,7 @@ object Exporter {
         return if (first != null && first.w > first.h && first.h > 0) Pair(1280, 720) else Pair(720, 1280)
     }
 
-    private fun buildComposition(p: Project, username: String, w: Int, h: Int, card: File?, removeAudio: Boolean): Composition {
+    private fun buildComposition(ctx: Context, p: Project, username: String, w: Int, h: Int, card: File?, removeAudio: Boolean): Composition {
         val total = p.clips.sumOf { clipMs(it) }
         val shared = HashMap<String, Bitmap>()
         var offset = 0L
@@ -147,7 +160,10 @@ object Exporter {
                             .setStartPositionMs(c.inMs).setEndPositionMs(c.outMs).build()
                     ).build()
             } else {
-                MediaItem.Builder().setUri(uri).setImageDurationMs(clipMs(c)).build()
+                val mb = MediaItem.Builder().setUri(uri).setImageDurationMs(clipMs(c))
+                val mime = try { if (c.path.startsWith("content:")) ctx.contentResolver.getType(uri) else null } catch (e: Exception) { null }
+                if (mime != null && mime.startsWith("image/")) mb.setMimeType(mime)
+                mb.build()
             }
             val b = EditedMediaItem.Builder(mediaItem)
             if (!c.isVideo) b.setFrameRate(30)
@@ -173,7 +189,7 @@ object Exporter {
 
         // Twirlly end screen
         if (card != null) {
-            val cardItem = MediaItem.Builder().setUri(Uri.fromFile(card)).setImageDurationMs(END_CARD_MS).build()
+            val cardItem = MediaItem.Builder().setUri(Uri.fromFile(card)).setMimeType(MimeTypes.IMAGE_PNG).setImageDurationMs(END_CARD_MS).build()
             items.add(
                 EditedMediaItem.Builder(cardItem).setFrameRate(30)
                     .setEffects(Effects(emptyList(), listOf<Effect>(Presentation.createForWidthAndHeight(w, h, Presentation.LAYOUT_SCALE_TO_FIT_WITH_CROP))))
