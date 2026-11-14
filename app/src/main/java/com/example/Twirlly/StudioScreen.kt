@@ -595,6 +595,14 @@ private fun EditorBody(vm: AppViewModel, uris: List<Uri>, draft: String?, onClos
     var templatesOpen by remember { mutableStateOf(false) }
     var exporting by remember { mutableStateOf(false) }
     var exportPct by remember { mutableIntStateOf(0) }
+    // background safety copy of the edit every 20 seconds; removed when you leave the editor normally
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(20_000)
+            if (project.clips.isNotEmpty()) vm.autoSave(project.toJson())
+        }
+    }
+    DisposableEffect(Unit) { onDispose { vm.clearAutoSave() } }
     var voiceOpen by remember { mutableStateOf(false) }
     var recording by remember { mutableStateOf(false) }
     var recStart by remember { mutableLongStateOf(0L) }
@@ -723,7 +731,7 @@ private fun EditorBody(vm: AppViewModel, uris: List<Uri>, draft: String?, onClos
         if (Build.VERSION.SDK_INT < 29) { toast("Saving needs Android 10 or newer"); return }
         exporting = true
         exportPct = 0
-        Exporter.export(ctx, project, vm.profile.value.name, { exportPct = it }) { _, msg -> exporting = false; toast(msg) }
+        Exporter.export(ctx, project, vm.profile.value.name, !(vm.settings.value.premium && !vm.settings.value.watermark), { exportPct = it }) { _, msg -> exporting = false; toast(msg) }
     }
 
     fun addFx(kind: Int) {
@@ -1420,7 +1428,7 @@ private fun EditorBody(vm: AppViewModel, uris: List<Uri>, draft: String?, onClos
                 Column {
                     LinearProgressIndicator(progress = { exportPct / 100f }, modifier = Modifier.fillMaxWidth())
                     Spacer(Modifier.height(8.dp))
-                    Text("$exportPct%  -  a Twirlly mark and end screen are added", fontSize = 12.sp, color = Color.Gray)
+                    Text("$exportPct%  -  a Twirlly mark and end logo are added", fontSize = 12.sp, color = Color.Gray)
                 }
             },
             confirmButton = { TextButton(onClick = { Exporter.cancel(); exporting = false }) { Text("Cancel") } }
