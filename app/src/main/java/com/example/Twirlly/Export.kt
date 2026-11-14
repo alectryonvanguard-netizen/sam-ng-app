@@ -30,6 +30,8 @@ import androidx.media3.transformer.Transformer
 import com.google.common.collect.ImmutableList
 import java.io.File
 import java.io.FileOutputStream
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import kotlin.math.abs
 import kotlin.math.max
 
@@ -65,18 +67,24 @@ object Exporter {
         val app = ctx.applicationContext
         val out = File(app.cacheDir, "export_" + System.currentTimeMillis() + ".mp4")
         val size = outputSize(project)
+        val totalMs = project.clips.sumOf { clipMs(it) }
+        // a short beat that plays exactly when the big Twirlly logo comes in
+        val sting: File? = if (watermark && totalMs >= 3000L) {
+            try { makeSting(app, totalMs - minOf(END_LOGO_MS, totalMs / 2)) } catch (e: Exception) { null }
+        } else null
 
         fun finish(ok: Boolean, msg: String) {
             stopPoll()
             transformer = null
+            sting?.delete()
             onDone(ok, msg)
         }
 
-        // If the first try fails, the second one leaves out the clips' own sound
+        // If a try fails, the next one leaves out extras: 0 = everything, 1 = no clip sound, 2 = no clip sound and no beat
         fun attempt(step: Int) {
-            val removeAudio = step == 1
+            val removeAudio = step >= 1
             val comp = try {
-                buildComposition(app, project, username, watermark, size.first, size.second, removeAudio)
+                buildComposition(app, project, username, watermark, size.first, size.second, removeAudio, if (step < 2) sting else null)
             } catch (e: Exception) {
                 finish(false, "Could not prepare the video")
                 return
@@ -89,14 +97,14 @@ object Exporter {
                     override fun onCompleted(composition: Composition, exportResult: ExportResult) {
                         val ok = saveToGallery(app, out.absolutePath, true)
                         out.delete()
-                        val note = if (step == 1) " (without the clip sound)" else ""
+                        val note = when (step) { 1 -> " (without the clip sound)"; 2 -> " (without the clip sound and end beat)"; else -> "" }
                         finish(ok, if (ok) "Saved to your gallery (Movies/Twirlly)$note" else "Could not save to the gallery")
                     }
 
                     override fun onError(composition: Composition, exportResult: ExportResult, exportException: ExportException) {
                         out.delete()
                         stopPoll()
-                        if (step < 1) attempt(step + 1)
+                        if (step < 2) attempt(step + 1)
                         else finish(
                             false,
                             "Could not save the video (" + exportException.errorCodeName +
@@ -138,7 +146,7 @@ object Exporter {
         return if (first != null && first.w > first.h && first.h > 0) Pair(1280, 720) else Pair(720, 1280)
     }
 
-    private fun buildComposition(ctx: Context, p: Project, username: String, watermark: Boolean, w: Int, h: Int, removeAudio: Boolean): Composition {
+    private fun buildComposition(ctx: Context, p: Project, username: String, watermark: Boolean, w: Int, h: Int, removeAudio: Boolean, sting: File?): Composition {
         val total = p.clips.sumOf { clipMs(it) }
         val shared = HashMap<String, Bitmap>()
         var offset = 0L
@@ -197,6 +205,10 @@ object Exporter {
             room -= take
         }
         if (audioItems.isNotEmpty()) sequences.add(EditedMediaItemSequence(audioItems))
+        if (sting != null) {
+            val stingItem = EditedMediaItem.Builder(MediaItem.Builder().setUri(Uri.fromFile(sting)).build()).setRemoveVideo(true).build()
+            sequences.add(EditedMediaItemSequence(listOf(stingItem)))
+        }
         return Composition.Builder(sequences).build()
     }
 }
@@ -338,4 +350,48 @@ private class ExportOverlay(
         c.drawText("Twirlly", x0 + u + gap, y0 + u * 0.46f, t1)
         c.drawText(handle, x0 + u + gap, y0 + u * 0.92f, t2)
     }
+}
+
+
+/**
+ * Makes the Twirlly logo beat as a small sound file: silence until the logo comes in, then a soft kick
+ * followed by a quick rising chime. It is mixed under the video's own sound.
+ */
+private fun makeSting(ctx: Context, atMs: Long): File {
+    val sr = 44100
+    val tailMs = 1800L
+    val total = ((atMs + tailMs) * sr / 1000).toInt()
+    val data = ShortArray(total)
+    val start = (atMs * sr / 1000).toInt()
+    fun add(i: Int, v: Double) {
+        if (i in data.indices) data[i] = (data[i] + (v * 32767).toInt()).coerceIn(-32767, 32767).toShort()
+    }
+    // soft kick
+    var phase = 0.0
+    val kickN = (0.32 * sr).toInt()
+    for (n in 0 until kickN) {
+        val t = n / sr.toDouble()
+        phase += 2 * Math.PI * (45 + 140 * Math.exp(-t * 22)) / sr
+        add(start + n, Math.sin(phase) * Math.exp(-t * 9) * 0.85)
+    }
+    // rising chime: E5, G#5, B5, E6
+    val notes = doubleArrayOf(659.25, 830.61, 987.77, 1318.51)
+    for ((k, f) in notes.withIndex()) {
+        val st = start + ((0.12 + k * 0.11) * sr).toInt()
+        val len = (1.1 * sr).toInt()
+        for (n in 0 until len) {
+            val t = n / sr.toDouble()
+            val env = Math.exp(-t * 3.2) * (1 - Math.exp(-t * 400))
+            add(st + n, (Math.sin(2 * Math.PI * f * t) + 0.35 * Math.sin(2 * Math.PI * f * 2 * t)) * env * 0.22)
+        }
+    }
+    val f = File(ctx.cacheDir, "export_sting_" + System.currentTimeMillis() + ".wav")
+    val bb = ByteBuffer.allocate(44 + data.size * 2).order(ByteOrder.LITTLE_ENDIAN)
+    bb.put("RIFF".toByteArray()); bb.putInt(36 + data.size * 2); bb.put("WAVE".toByteArray())
+    bb.put("fmt ".toByteArray()); bb.putInt(16); bb.putShort(1); bb.putShort(1)
+    bb.putInt(sr); bb.putInt(sr * 2); bb.putShort(2); bb.putShort(16)
+    bb.put("data".toByteArray()); bb.putInt(data.size * 2)
+    for (v in data) bb.putShort(v)
+    FileOutputStream(f).use { it.write(bb.array()) }
+    return f
 }
