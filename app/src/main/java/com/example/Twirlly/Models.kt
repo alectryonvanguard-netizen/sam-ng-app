@@ -78,10 +78,13 @@ data class Profile(
 )
 
 const val MAX_OWN_POSTS = 100
+const val AUTOSAVE_ID = 1L
 const val STORAGE_LIMIT = 5_000_000L
 
 data class AppSettings(
     val email: String = "",
+    val watermark: Boolean = true,
+    val devMode: Boolean = false,
     val breakHours: Int = 2,
     val kidsMode: Boolean = false,
     val pinHash: String = "",
@@ -209,6 +212,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         watchedSecs += 1
         if (watchedSecs % 30L == 0L) persist()
         if (watchedSecs % 60L == 0L) purgeStories()
+        if (watchedSecs % 1800L == 0L) housekeeping()
         val st = _settings.value
         if (st.bedtimeOn && now >= bedSnoozeUntil && inBedtime(st.bedStart, st.bedEnd)) {
             _breakKind.value = "bedtime"
@@ -243,6 +247,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         load()
         purgeStories()
         ensureDemo()
+        housekeeping()
     }
 
     private fun ensureDemo() {
@@ -291,7 +296,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 _settings.value = AppSettings(
                     notifications = s.optBoolean("notif", true), autoplay = s.optBoolean("auto", true),
                     muted = s.optBoolean("muted", false), theme = s.optInt("theme", 0), accent = s.optInt("accent", 0),
-                    onboarded = s.optBoolean("onb", false), premium = s.optBoolean("prem", false), email = s.optString("email", ""), coins = s.optInt("coins", 0), breakHours = s.optInt("brk", 2), kidsMode = s.optBoolean("kids", false), pinHash = s.optString("pin", ""), bedtimeOn = s.optBoolean("bed", false), bedStart = s.optInt("bedS", 22), bedEnd = s.optInt("bedE", 6), streak = s.optInt("streak", 0), bestStreak = s.optInt("best", 0), lastDay = s.optLong("lday", 0L)
+                    onboarded = s.optBoolean("onb", false), premium = s.optBoolean("prem", false), email = s.optString("email", ""), coins = s.optInt("coins", 0), breakHours = s.optInt("brk", 2), watermark = s.optBoolean("wm", true), devMode = s.optBoolean("dev", false), kidsMode = s.optBoolean("kids", false), pinHash = s.optString("pin", ""), bedtimeOn = s.optBoolean("bed", false), bedStart = s.optInt("bedS", 22), bedEnd = s.optInt("bedE", 6), streak = s.optInt("streak", 0), bestStreak = s.optInt("best", 0), lastDay = s.optLong("lday", 0L)
                 )
             }
             watchedSecs = o.optLong("watch", 0L)
@@ -329,7 +334,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             .put("avatar", p.avatar ?: "").put("banner", p.banner ?: "").put("bv", p.bannerVideo).put("bs", p.bannerStartMs).put("bsc", p.bannerScale.toDouble()).put("box", p.bannerOx.toDouble()).put("boy", p.bannerOy.toDouble()).put("ver", p.verified).put("vreq", p.verifyRequest).put("nca", p.nameChangedAt).put("uca", p.usernameChangedAt).put("private", p.isPrivate))
         val s = _settings.value
         put("settings", JSONObject().put("notif", s.notifications).put("auto", s.autoplay).put("muted", s.muted)
-            .put("theme", s.theme).put("accent", s.accent).put("onb", s.onboarded).put("prem", s.premium).put("email", s.email).put("coins", s.coins).put("brk", s.breakHours).put("kids", s.kidsMode).put("pin", s.pinHash).put("bed", s.bedtimeOn).put("bedS", s.bedStart).put("bedE", s.bedEnd).put("streak", s.streak).put("best", s.bestStreak).put("lday", s.lastDay))
+            .put("theme", s.theme).put("accent", s.accent).put("onb", s.onboarded).put("prem", s.premium).put("email", s.email).put("coins", s.coins).put("brk", s.breakHours).put("wm", s.watermark).put("dev", s.devMode).put("kids", s.kidsMode).put("pin", s.pinHash).put("bed", s.bedtimeOn).put("bedS", s.bedStart).put("bedE", s.bedEnd).put("streak", s.streak).put("best", s.bestStreak).put("lday", s.lastDay))
         put("watch", watchedSecs)
         put("drafts", JSONArray().also { a -> _drafts.value.forEach { a.put(JSONObject().put("id", it.id).put("t", it.title).put("j", it.json).put("at", it.savedAt)) } })
         put("playlists", JSONObject().also { po -> _playlists.value.forEach { (k, v) -> po.put(k, JSONArray(v)) } })
@@ -346,7 +351,15 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun exportJson(): String = buildJson().toString(2)
 
     private fun persist() {
-        val json = buildJson().toString()
+        var json = buildJson().toString()
+        // quiet storage guard: if the saved data grows past the limit, the oldest posts are removed
+        var guard = 0
+        while (json.length > STORAGE_LIMIT && guard < 20) {
+            val oldest = _videos.value.filter { it.local }.minByOrNull { it.createdAt } ?: break
+            _videos.update { l -> l.filter { it.id != oldest.id } }
+            json = buildJson().toString()
+            guard++
+        }
         writer.execute { try { stateFile.writeText(json) } catch (_: Exception) {} }
     }
 
@@ -473,6 +486,53 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         _drafts.update { (listOf(Draft(now, title, json, now)) + it).take(10) }
         persist()
     }
+    /** Background safety copy of the edit you are working on. It is removed when you leave the editor normally. */
+    fun autoSave(json: String) {
+        val now = System.currentTimeMillis()
+        _drafts.update { l -> (listOf(Draft(AUTOSAVE_ID, "Auto-saved edit (recovered)", json, now)) + l.filter { it.id != AUTOSAVE_ID }).take(10) }
+        persist()
+    }
+    fun clearAutoSave() {
+        if (_drafts.value.any { it.id == AUTOSAVE_ID }) {
+            _drafts.update { l -> l.filter { it.id != AUTOSAVE_ID } }
+            persist()
+        }
+    }
+
+    /** Quietly removes leftover files nothing uses any more (old voice recordings, unfinished exports). */
+    fun housekeeping() {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val used = HashSet<String>()
+                fun addProject(json: String?) {
+                    if (json != null) try { projectFromJson(json).files().forEach { used.add(it) } } catch (_: Exception) {}
+                }
+                _videos.value.forEach { v -> addProject(v.project); used.add(v.url); used.addAll(v.images); v.audio?.let { used.add(it) } }
+                _drafts.value.forEach { addProject(it.json) }
+                _profile.value.avatar?.let { used.add(it) }
+                _profile.value.banner?.let { used.add(it) }
+                val now = System.currentTimeMillis()
+                File(ctx.filesDir, "media").listFiles()?.forEach { f ->
+                    if (f.isFile && f.absolutePath !in used && f.lastModified() < now - 6 * 3_600_000L) f.delete()
+                }
+                ctx.cacheDir.listFiles()?.forEach { f ->
+                    if (f.isFile && f.name.startsWith("export_") && f.lastModified() < now - 3_600_000L) f.delete()
+                }
+            } catch (_: Exception) {}
+        }
+    }
+
+    /** Phone, app and storage information for finding problems. It holds no name, email or posts. */
+    fun diagnostics(): String = buildString {
+        val st = _settings.value
+        appendLine("Twirlly diagnostics")
+        appendLine("Android " + android.os.Build.VERSION.RELEASE + " (API " + android.os.Build.VERSION.SDK_INT + "), " + android.os.Build.MANUFACTURER + " " + android.os.Build.MODEL)
+        appendLine("Own posts: " + _videos.value.count { it.local } + ", drafts: " + _drafts.value.size + ", playlists: " + _playlists.value.size)
+        appendLine("Storage used: " + mediaBytes() + " of " + STORAGE_LIMIT + " bytes")
+        appendLine("Premium: " + st.premium + ", watermark: " + st.watermark + ", kids mode: " + st.kidsMode + ", bedtime: " + st.bedtimeOn + ", break hours: " + st.breakHours)
+        appendLine("Watched today: " + ((watchLog[dayKey(System.currentTimeMillis())] ?: 0L) / 60) + " min")
+    }
+
     fun deleteDraft(id: Long) { _drafts.update { l -> l.filter { it.id != id } }; persist() }
     fun removeDraftByJson(json: String) { _drafts.update { l -> l.filter { it.json != json } }; persist() }
 
