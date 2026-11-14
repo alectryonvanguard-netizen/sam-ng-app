@@ -159,6 +159,16 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private val _playlists = MutableStateFlow<Map<String, List<Long>>>(emptyMap())
     val playlists: StateFlow<Map<String, List<Long>>> = _playlists.asStateFlow()
     private val lastEp = mutableMapOf<Long, Int>()
+    private val _hidden = MutableStateFlow<Set<Long>>(emptySet())
+    /** Posts you marked "Not interested". */
+    val hidden: StateFlow<Set<Long>> = _hidden.asStateFlow()
+    private val _blocked = MutableStateFlow<Set<String>>(emptySet())
+    /** Creators you blocked. Their posts are not shown. */
+    val blocked: StateFlow<Set<String>> = _blocked.asStateFlow()
+    private val reports = mutableListOf<JSONObject>()
+    private val _landscape = MutableStateFlow(false)
+    val landscape: StateFlow<Boolean> = _landscape.asStateFlow()
+    fun setLandscape(on: Boolean) { _landscape.value = on }
     private val watchLog = mutableMapOf<String, Long>()
     private val _breakKind = MutableStateFlow("break")
     /** "break" (watched for a long time) or "bedtime". */
@@ -293,6 +303,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 po.keys().forEach { k -> val a = po.getJSONArray(k); m[k] = (0 until a.length()).map { a.getLong(it) } }
                 _playlists.value = m
             }
+            _hidden.value = (o.optJSONArray("hidden") ?: JSONArray()).let { a -> (0 until a.length()).map { a.getLong(it) }.toSet() }
+            _blocked.value = (o.optJSONArray("blocked") ?: JSONArray()).let { a -> (0 until a.length()).map { a.getString(it) }.toSet() }
+            reports.clear()
+            (o.optJSONArray("reports") ?: JSONArray()).let { a -> for (i in 0 until a.length()) reports.add(a.getJSONObject(i)) }
             lastEp.clear()
             o.optJSONObject("lastep")?.let { lo -> lo.keys().forEach { k -> lastEp[k.toLong()] = lo.getInt(k) } }
             watchLog.clear()
@@ -319,6 +333,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         put("watch", watchedSecs)
         put("drafts", JSONArray().also { a -> _drafts.value.forEach { a.put(JSONObject().put("id", it.id).put("t", it.title).put("j", it.json).put("at", it.savedAt)) } })
         put("playlists", JSONObject().also { po -> _playlists.value.forEach { (k, v) -> po.put(k, JSONArray(v)) } })
+        put("hidden", JSONArray(_hidden.value.toList()))
+        put("blocked", JSONArray(_blocked.value.toList()))
+        put("reports", JSONArray().also { a -> reports.takeLast(50).forEach { a.put(it) } })
         put("lastep", JSONObject().also { lo -> lastEp.forEach { (k, v) -> lo.put(k.toString(), v) } })
         put("wlog", JSONObject().also { wo -> watchLog.entries.sortedByDescending { it.key }.take(14).forEach { wo.put(it.key, it.value) } })
         put("events", JSONArray().also { a ->
@@ -474,6 +491,25 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         persist()
     }
     fun deletePlaylist(name: String) { _playlists.update { it - name }; persist() }
+
+    fun notInterested(id: Long) { _hidden.update { it + id }; persist() }
+
+    fun blockUser(user: String) {
+        _blocked.update { it + user }
+        _following.update { it - user }
+        addEvent("You blocked @$user")
+        persist()
+    }
+    fun unblockUser(user: String) { _blocked.update { it - user }; persist() }
+
+    /** Saved on the phone. Replace this later to send reports to your own server. */
+    fun reportPost(id: Long, reason: String) {
+        val v = _videos.value.firstOrNull { it.id == id }
+        reports.add(JSONObject().put("post", id).put("user", v?.user ?: "").put("reason", reason).put("at", System.currentTimeMillis()))
+        _hidden.update { it + id }
+        addEvent("You reported a post")
+        persist()
+    }
 
     fun lastEpisode(seriesId: Long): Int? = lastEp[seriesId]
     fun setLastEpisode(seriesId: Long, ep: Int) {
