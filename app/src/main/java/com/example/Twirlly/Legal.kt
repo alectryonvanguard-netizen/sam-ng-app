@@ -20,7 +20,7 @@ import androidx.compose.ui.window.DialogProperties
 const val LEGAL_ENTITY = "Twirlly"
 const val LEGAL_ADDRESS = "Postal address available on request by email"
 const val GOVERNING_LAW = "the country where Twirlly's operator is established"
-const val SUPPORT_EMAIL = "samsangacom249@gmail.com"
+const val SUPPORT_EMAIL = "alectryonvanguard@gmail.com"
 
 const val PRIVACY_POLICY = """PRIVACY POLICY
 Effective date: November 6, 2026
