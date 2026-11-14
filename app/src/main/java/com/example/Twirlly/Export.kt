@@ -19,6 +19,7 @@ import androidx.media3.effect.BitmapOverlay
 import androidx.media3.effect.OverlayEffect
 import androidx.media3.effect.Presentation
 import androidx.media3.effect.RgbMatrix
+import androidx.media3.effect.SpeedChangeEffect
 import androidx.media3.transformer.Composition
 import androidx.media3.transformer.EditedMediaItem
 import androidx.media3.transformer.EditedMediaItemSequence
@@ -35,13 +36,13 @@ import java.nio.ByteOrder
 import kotlin.math.abs
 import kotlin.math.max
 
-/** How long the big Twirlly logo stays over the end of a saved video. */
-const val END_LOGO_MS = 2200L
+/** The Twirlly logo gets its own room after the video: the saved video is this much longer. */
+const val OUTRO_MS = 1500L
 
 /**
  * Saves a project as an MP4 in the gallery (Movies/Twirlly), the way TikTok and Instagram do:
  * a small Twirlly mark with your @username that moves from the top left to the bottom right during the video,
- * and the big Twirlly logo with your @username over the last seconds, on a see-through dark layer.
+ * and then the big Twirlly logo with your @username in its own 1.5 seconds after the video, on a see-through dark layer.
  * Premium can switch the mark off (watermark = false).
  * Included: clips with trim and filter, text and emoji layers, music and voice-overs.
  * Not included yet: transitions, keyframe motion, the effects track, speed changes and photo/video stickers.
@@ -69,8 +70,8 @@ object Exporter {
         val size = outputSize(project)
         val totalMs = project.clips.sumOf { clipMs(it) }
         // a short beat that plays exactly when the big Twirlly logo comes in
-        val sting: File? = if (watermark && totalMs >= 3000L) {
-            try { makeSting(app, totalMs - minOf(END_LOGO_MS, totalMs / 2)) } catch (e: Exception) { null }
+        val sting: File? = if (watermark && totalMs >= 1000L) {
+            try { makeSting(app, totalMs) } catch (e: Exception) { null }
         } else null
 
         fun finish(ok: Boolean, msg: String) {
@@ -80,11 +81,11 @@ object Exporter {
             onDone(ok, msg)
         }
 
-        // If a try fails, the next one leaves out extras: 0 = everything, 1 = no clip sound, 2 = no clip sound and no beat
+        // If a try fails, the next one leaves out extras: 0 = everything, 1 = no clip sound, 2 = no clip sound, no end logo and no beat
         fun attempt(step: Int) {
             val removeAudio = step >= 1
             val comp = try {
-                buildComposition(app, project, username, watermark, size.first, size.second, removeAudio, if (step < 2) sting else null)
+                buildComposition(app, project, username, watermark, size.first, size.second, removeAudio, if (step < 2) sting else null, step < 2)
             } catch (e: Exception) {
                 finish(false, "Could not prepare the video")
                 return
@@ -97,7 +98,7 @@ object Exporter {
                     override fun onCompleted(composition: Composition, exportResult: ExportResult) {
                         val ok = saveToGallery(app, out.absolutePath, true)
                         out.delete()
-                        val note = when (step) { 1 -> " (without the clip sound)"; 2 -> " (without the clip sound and end beat)"; else -> "" }
+                        val note = when (step) { 1 -> " (without the clip sound)"; 2 -> " (without the clip sound, end logo and beat)"; else -> "" }
                         finish(ok, if (ok) "Saved to your gallery (Movies/Twirlly)$note" else "Could not save to the gallery")
                     }
 
@@ -146,12 +147,13 @@ object Exporter {
         return if (first != null && first.w > first.h && first.h > 0) Pair(1280, 720) else Pair(720, 1280)
     }
 
-    private fun buildComposition(ctx: Context, p: Project, username: String, watermark: Boolean, w: Int, h: Int, removeAudio: Boolean, sting: File?): Composition {
+    private fun buildComposition(ctx: Context, p: Project, username: String, watermark: Boolean, w: Int, h: Int, removeAudio: Boolean, sting: File?, withOutro: Boolean): Composition {
         val total = p.clips.sumOf { clipMs(it) }
         val shared = HashMap<String, Bitmap>()
         var offset = 0L
         val items = ArrayList<EditedMediaItem>()
-        for (c in p.clips) {
+        val lastIdx = p.clips.lastIndex
+        for ((idx, c) in p.clips.withIndex()) {
             val uri = mediaUri(c.path)
             val mediaItem = if (c.isVideo) {
                 MediaItem.Builder().setUri(uri)
@@ -160,7 +162,8 @@ object Exporter {
                             .setStartPositionMs(c.inMs).setEndPositionMs(c.outMs).build()
                     ).build()
             } else {
-                val mb = MediaItem.Builder().setUri(uri).setImageDurationMs(clipMs(c))
+                val extra = if (withOutro && watermark && idx == lastIdx) OUTRO_MS else 0L
+                val mb = MediaItem.Builder().setUri(uri).setImageDurationMs(clipMs(c) + extra)
                 val mime = try { if (c.path.startsWith("content:")) ctx.contentResolver.getType(uri) else null } catch (e: Exception) { null }
                 if (mime != null && mime.startsWith("image/")) mb.setMimeType(mime)
                 mb.build()
@@ -187,10 +190,37 @@ object Exporter {
             offset += clipMs(c)
         }
 
+        // the logo's own room after a video: the last moment of the last clip is held (very slow motion) for 1.5 seconds
+        val lastClip = p.clips.lastOrNull()
+        if (withOutro && watermark && lastClip != null && lastClip.isVideo) {
+            val s0 = maxOf(lastClip.inMs, lastClip.outMs - 120L)
+            val held = MediaItem.Builder().setUri(mediaUri(lastClip.path))
+                .setClippingConfiguration(
+                    MediaItem.ClippingConfiguration.Builder().setStartPositionMs(s0).setEndPositionMs(lastClip.outMs).build()
+                ).build()
+            val hb = EditedMediaItem.Builder(held).setRemoveAudio(true)
+            val hfx = ArrayList<Effect>()
+            val harr = filterArray(lastClip.filter)
+            if (harr != null) {
+                val hm = floatArrayOf(
+                    harr[0], harr[5], harr[10], harr[15], harr[1], harr[6], harr[11], harr[16],
+                    harr[2], harr[7], harr[12], harr[17], harr[3], harr[8], harr[13], harr[18]
+                )
+                hfx.add(object : RgbMatrix {
+                    override fun getMatrix(presentationTimeUs: Long, useHdr: Boolean): FloatArray = hm
+                })
+            }
+            hfx.add(SpeedChangeEffect((lastClip.outMs - s0).coerceAtLeast(1L).toFloat() / OUTRO_MS))
+            hfx.add(Presentation.createForWidthAndHeight(w, h, Presentation.LAYOUT_SCALE_TO_FIT_WITH_CROP))
+            hfx.add(OverlayEffect(ImmutableList.of(ExportOverlay(p, username, total, w, h, total, shared, watermark))))
+            hb.setEffects(Effects(emptyList(), hfx))
+            items.add(hb.build())
+        }
+
         val sequences = mutableListOf(EditedMediaItemSequence(items))
 
         // music and voice-overs, one after another from the start
-        var room = total
+        var room = total + (if (withOutro && watermark) OUTRO_MS else 0L)
         val audioItems = ArrayList<EditedMediaItem>()
         for (a in p.audios.sortedBy { it.startMs }) {
             if (room <= 300L) break
@@ -267,10 +297,8 @@ private class ExportOverlay(
         val visible = layers.filter { ms >= it.startMs && ms <= it.endMs }
         val mid = total / 2
         val phase = if (ms < mid) 0 else 1
-        // the big logo comes over the last seconds; it fades in
-        val endLen = minOf(END_LOGO_MS, total / 2)
-        val endStart = total - endLen
-        val eStep = if (mark && ms >= endStart) (((ms - endStart) / 400f).coerceIn(0f, 1f) * 8).toInt() else 0
+        // the big logo comes in its own room after the video; it fades in
+        val eStep = if (mark && ms >= total) (((ms - total) / 300f).coerceIn(0f, 1f) * 8).toInt() else 0
         // the small mark fades out and back in while it jumps to the other corner, and goes away under the big logo
         val aStep = if (!mark || eStep > 0) 0 else (abs(ms - mid) / 300f).coerceIn(0f, 1f).let { (it * 4).toInt() }
         val key = visible.joinToString(",") { it.id.toString() } + "|" + phase + "|" + aStep + "|" + eStep
@@ -359,7 +387,7 @@ private class ExportOverlay(
  */
 private fun makeSting(ctx: Context, atMs: Long): File {
     val sr = 44100
-    val tailMs = 1800L
+    val tailMs = OUTRO_MS
     val total = ((atMs + tailMs) * sr / 1000).toInt()
     val data = ShortArray(total)
     val start = (atMs * sr / 1000).toInt()
@@ -384,6 +412,11 @@ private fun makeSting(ctx: Context, atMs: Long): File {
             val env = Math.exp(-t * 3.2) * (1 - Math.exp(-t * 400))
             add(st + n, (Math.sin(2 * Math.PI * f * t) + 0.35 * Math.sin(2 * Math.PI * f * 2 * t)) * env * 0.22)
         }
+    }
+    val fadeN = (0.12 * sr).toInt()
+    for (i in 0 until fadeN) {
+        val idx = data.size - 1 - i
+        if (idx >= 0) data[idx] = (data[idx] * (i / fadeN.toDouble())).toInt().toShort()
     }
     val f = File(ctx.cacheDir, "export_sting_" + System.currentTimeMillis() + ".wav")
     val bb = ByteBuffer.allocate(44 + data.size * 2).order(ByteOrder.LITTLE_ENDIAN)
