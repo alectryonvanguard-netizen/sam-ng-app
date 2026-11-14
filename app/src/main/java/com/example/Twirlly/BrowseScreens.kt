@@ -83,6 +83,8 @@ fun PostCard(v: Video, modifier: Modifier = Modifier, onClick: () -> Unit = {}, 
 fun DiscoverScreen(vm: AppViewModel, onUser: (String) -> Unit = {}, onOpen: (List<Long>, Int) -> Unit) {
     val videos by vm.videos.collectAsState()
     val following by vm.following.collectAsState()
+    val hiddenIds by vm.hidden.collectAsState()
+    val blockedUsers by vm.blocked.collectAsState()
     var q by remember { mutableStateOf("") }
     val tags = remember(videos) {
         Regex("#\\w+").findAll(videos.joinToString(" ") { it.caption })
@@ -90,7 +92,7 @@ fun DiscoverScreen(vm: AppViewModel, onUser: (String) -> Unit = {}, onOpen: (Lis
             .entries.sortedByDescending { it.value }.take(10).map { it.key }
     }
     val creators = DemoContent.creators
-    val results = videos.filter { !it.story && (it.seriesId == null || it.episodeNo <= 1) && (q.isBlank() || it.caption.contains(q, true) || it.user.contains(q, true)) }
+    val results = videos.filter { !it.story && it.id !in hiddenIds && it.user !in blockedUsers && (it.seriesId == null || it.episodeNo <= 1) && (q.isBlank() || it.caption.contains(q, true) || it.user.contains(q, true)) }
 
     Column(Modifier.fillMaxSize().statusBarsPadding().padding(12.dp)) {
         OutlinedTextField(
