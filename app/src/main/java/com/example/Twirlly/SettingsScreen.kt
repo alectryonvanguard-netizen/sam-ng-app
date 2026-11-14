@@ -89,6 +89,7 @@ fun SettingsScreen(vm: AppViewModel, onBack: () -> Unit, onEditProfile: () -> Un
     val profile by vm.profile.collectAsState()
     val blocked by vm.blocked.collectAsState()
     var blockedOpen by remember { mutableStateOf(false) }
+    var vTaps by remember { mutableIntStateOf(0) }
     var legal by remember { mutableStateOf<String?>(null) }
     var premiumOpen by remember { mutableStateOf(false) }
     var insightsOpen by remember { mutableStateOf(false) }
@@ -184,6 +185,8 @@ fun SettingsScreen(vm: AppViewModel, onBack: () -> Unit, onEditProfile: () -> Un
                 })
                 Row3(Icons.Default.AccountCircle, if (s.email.isBlank()) "Guest mode" else s.email, if (s.email.isBlank()) "Sign in from the welcome page after logging out" else "Signed in")
                 Row3(Icons.Default.Verified, if (profile.verified) "Verified" else "Request a verified badge", if (profile.verified) "Your account is verified" else if (profile.verifyRequest.isNotBlank()) "Request saved" else "For businesses and known creators", onClick = { verifyOpen = true })
+                if (s.premium) SwitchRow(Icons.Default.BrandingWatermark, "Twirlly watermark", "Show the mark and end logo on videos you save", s.watermark) { v -> vm.updateSettings { it.copy(watermark = v) } }
+                else Row3(Icons.Default.BrandingWatermark, "Twirlly watermark", "Premium can remove it from saved videos", onClick = { premiumOpen = true })
                 Row3(Icons.Default.EmojiEvents, "Rewards and level", "Streak, badges and weekly challenges", onClick = { rewardsOpen = true })
                 Row3(Icons.Default.Block, "Blocked accounts", if (blocked.isEmpty()) "Nobody is blocked" else blocked.size.toString() + " blocked", onClick = { blockedOpen = true })
                 Row3(Icons.Default.Backup, "Back up to a file", "Save your profile and posts", onClick = { createBackup.launch("twirlly-backup.json") })
@@ -274,10 +277,23 @@ fun SettingsScreen(vm: AppViewModel, onBack: () -> Unit, onEditProfile: () -> Un
 
             Section("About")
             SettingsCard {
-                Row3(Icons.Default.Info, "Version", version)
+                Row3(Icons.Default.Info, "Version", version, onClick = {
+                    vTaps++
+                    if (vTaps >= 7 && !s.devMode) { vm.updateSettings { it.copy(devMode = true) }; toast("Developer tools unlocked") }
+                })
                 Row3(Icons.Default.Policy, "Privacy policy", onClick = { legal = "privacy" })
                 Row3(Icons.Default.Gavel, "Terms of service", onClick = { legal = "terms" })
                 Row3(Icons.Default.Description, "Open-source licenses", onClick = { legal = "licenses" })
+                if (s.devMode) {
+                    Row3(Icons.Default.Build, "Copy diagnostics", "Phone, app and storage info. No personal details.", onClick = {
+                        (ctx.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager)
+                            .setPrimaryClip(android.content.ClipData.newPlainText("Twirlly diagnostics", vm.diagnostics()))
+                        toast("Diagnostics copied")
+                    })
+                    Row3(Icons.Default.Delete, "Clean up unused files now", "Old recordings and unfinished exports", onClick = { vm.housekeeping(); vm.clearTemp(); toast("Cleaning up") })
+                    Row3(Icons.Default.Timer, "Reset the watch timer", "Starts counting again from zero", onClick = { vm.endBreak(); toast("Timer reset") })
+                    Row3(Icons.Default.Info, "Hide developer tools", "They come back after 7 taps on Version", onClick = { vm.updateSettings { it.copy(devMode = false) }; vTaps = 0 })
+                }
             }
             Spacer(Modifier.height(30.dp))
         }
