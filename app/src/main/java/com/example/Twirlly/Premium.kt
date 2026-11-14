@@ -31,11 +31,12 @@ private val INCLUDED = listOf(
     "Accent colours" to "Make the whole app violet, green, amber or pink.",
     "Pro LIVE effects" to "Cool, Rose, Cinema, Mirror and Glow looks in LIVE.",
     "Creator insights" to "Posts, likes, comments and shares at a glance.",
+    "No watermark" to "Save videos without the Twirlly mark and end logo. Switch it off in Settings.",
     "Premium badge" to "A gold star next to your name.",
     "Early access" to "Try new features first."
 )
 private val COMING = listOf(
-    "No watermark and 4K export" to "Export finished videos in the best quality.",
+    "4K export" to "Save finished videos in the best quality.",
     "Cloud backup and sync" to "Keep projects safe and continue on any device."
 )
 
