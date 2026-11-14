@@ -235,6 +235,7 @@ fun VideoPage(v: Video, active: Boolean, vm: AppViewModel, onUser: (Video) -> Un
                     if (isDrama && pendingLike?.isActive == true) { pendingLike?.cancel(); heart = false; vm.openDrama(sid, vm.lastEpisode(sid) ?: maxOf(1, v.episodeNo)) }
                     else if (!v.isImage || isAlbum) paused = !paused
                 },
+                onLongPress = { showShare = true },
                 onDoubleTap = {
                     heart = true
                     if (isDrama) pendingLike = scope.launch { delay(900); vm.doubleTapLike(v.id) }
