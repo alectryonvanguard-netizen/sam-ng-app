@@ -1,4 +1,3 @@
-
 package com.example.twirlly
 
 import android.Manifest
@@ -28,6 +27,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
@@ -129,6 +130,7 @@ fun TwirllyApp(vm: AppViewModel) {
     val breakDue by vm.breakDue.collectAsState()
     val breakKind by vm.breakKind.collectAsState()
     var pinAction by remember { mutableStateOf<(() -> Unit)?>(null) }
+    var quickMenu by remember { mutableStateOf(false) }
     fun gate(action: () -> Unit) { if (settings.kidsMode) pinAction = action else action() }
     LaunchedEffect(Unit) { while (true) { delay(1000); vm.watchTick() } }
     var tab by remember { mutableIntStateOf(0) }
@@ -171,7 +173,7 @@ fun TwirllyApp(vm: AppViewModel) {
         contentWindowInsets = WindowInsets(0.dp, 0.dp, 0.dp, 0.dp),
         bottomBar = {
             if (overlay !is Overlay.Editor) {
-                BottomBar(tab, barColor, fg) { i ->
+                BottomBar(tab, barColor, fg, onCreateLong = { quickMenu = true }) { i ->
                     if (i == 2) gate { vm.closeDrama(); overlay = Overlay.Editor(emptyList()) } else { vm.closeDrama(); tab = i; overlay = null }
                 }
             }
@@ -199,16 +201,10 @@ fun TwirllyApp(vm: AppViewModel) {
                     val list = o.ids.mapNotNull { id -> videos.firstOrNull { it.id == id } }
                     FeedPager(vm, list, o.start, { overlay = o.back }, null, openUser)
                 }
-                is Overlay.Editor -> EditorScreen(
-                    vm = vm,
-                    uris = o.uris,
-                    draft = o.draft,
-                    onClose = { overlay = null },
-                    onPosted = {
-                        overlay = null
-                        tab = 0
-                    }
-                )
+                is Overlay.Editor -> EditorScreen(vm, o.uris, o.draft, onClose = { overlay = null }) {
+                    overlay = null
+                    tab = 0
+                }
                 is Overlay.User -> UserProfileScreen(vm, o.name, onBack = { overlay = null }) { ids, start ->
                     overlay = Overlay.Viewer(ids, start, o)
                 }
@@ -219,6 +215,19 @@ fun TwirllyApp(vm: AppViewModel) {
         }
     }
     if (breakDue) BreakScreen(settings.breakHours, breakKind) { vm.endBreak() }
+    if (quickMenu) {
+        AlertDialog(
+            onDismissRequest = { quickMenu = false },
+            title = { Text("Quick create") },
+            text = {
+                Column {
+                    TextButton(onClick = { quickMenu = false; gate { vm.closeDrama(); overlay = Overlay.Editor(emptyList()) } }) { Text("New edit", fontSize = 17.sp) }
+                    TextButton(onClick = { quickMenu = false; gate { overlay = Overlay.Live(false) } }) { Text("Go LIVE", fontSize = 17.sp) }
+                }
+            },
+            confirmButton = { TextButton(onClick = { quickMenu = false }) { Text("Close") } }
+        )
+    }
     pinAction?.let { act ->
         PinDialog("Kids mode PIN", onDismiss = { pinAction = null }) { pin ->
             if (vm.checkPin(pin)) { pinAction = null; act(); true } else false
@@ -227,7 +236,7 @@ fun TwirllyApp(vm: AppViewModel) {
 }
 
 @Composable
-private fun BottomBar(tab: Int, bg: Color, fg: Color, onTab: (Int) -> Unit) {
+private fun BottomBar(tab: Int, bg: Color, fg: Color, onCreateLong: () -> Unit, onTab: (Int) -> Unit) {
     val items = listOf(
         Icons.Default.Home to "Home", Icons.Default.Search to "Discover",
         Icons.Default.Add to "", Icons.Default.Notifications to "Inbox",
@@ -239,7 +248,9 @@ private fun BottomBar(tab: Int, bg: Color, fg: Color, onTab: (Int) -> Unit) {
     ) {
         items.forEachIndexed { i, (icon, label) ->
             Box(
-                Modifier.weight(1f).fillMaxHeight().clickable { onTab(i) },
+                Modifier.weight(1f).fillMaxHeight().pointerInput(i) {
+                    detectTapGestures(onTap = { onTab(i) }, onLongPress = { if (i == 2) onCreateLong() })
+                },
                 contentAlignment = Alignment.Center
             ) {
                 if (i == 2) {
